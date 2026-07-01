@@ -38,6 +38,9 @@ Read-only:
 - `list_branches`
 - `list_pull_request_files`
 - `search_code`
+- `get_files_batch`
+- `list_tree`
+- `compare_refs`
 
 Write:
 
@@ -45,11 +48,36 @@ Write:
 - `delete_file`
 - `merge_pull_request`
 - `commit_large_file_from_url`
+- `commit_files`
+- `apply_unified_diff`
+- `create_branch_commit_pr`
+- `commit_files_from_manifest_url`
+- `update_pull_request`
+- `comment_pull_request`
 
 All tools now expose MCP `annotations` through `tools/list`. Read tools set
 `readOnlyHint:true`. Delete, merge, overwrite, and commit tools set
 `destructiveHint:true` where approval should be requested by the client. The
 server does not fake read-only hints on write tools.
+
+## Approval-friendly coding workflows
+
+Use these tools to avoid approval prompts per small operation:
+
+- `get_files_batch`: read many files in one read-only call.
+- `list_tree`: inspect repository structure in one read-only call.
+- `compare_refs`: review branch vs base changes in one read-only call.
+- `commit_files`: commit many text files at once, optionally creating a branch.
+- `apply_unified_diff`: send one unified diff and commit once.
+- `create_branch_commit_pr`: create branch, commit files, and open a PR in one
+  write workflow call.
+- `commit_files_from_manifest_url`: commit many source-url files from one JSON
+  manifest, useful for generated assets.
+- `update_pull_request` and `comment_pull_request`: PR housekeeping without
+  leaving the MCP flow.
+
+Recommended auto-approval policy: auto-approve read-only tools only. Keep write
+workflow tools as a single confirmation boundary instead of approving each file.
 
 ## Large-file usage
 

@@ -456,6 +456,136 @@ async function createCommitFromTreeEntries(token, owner, repo, branch, treeEntri
   return { commitSha: commit.sha, commitUrl: commit.html_url ?? `https://github.com/${owner}/${repo}/commit/${commit.sha}` };
 }
 
+async function createBranchRef(token, owner, repo, baseBranch, newBranch) {
+  validateBranch(baseBranch, { protect: false });
+  validateBranch(newBranch, { requirePrefix: true, protect: false });
+  const sha = await getBranchSha(token, owner, repo, baseBranch);
+  await githubRequest(token, `/repos/${owner}/${repo}/git/refs`, {
+    method: 'POST',
+    body: JSON.stringify({ ref: `refs/heads/${newBranch}`, sha }),
+  });
+  return sha;
+}
+
+async function createPullRequest(token, owner, repo, args) {
+  const pr = await githubRequest(token, `/repos/${owner}/${repo}/pulls`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title: String(args.title),
+      body: String(args.body ?? ''),
+      head: String(args.head),
+      base: String(args.base ?? 'main'),
+      draft: Boolean(args.draft),
+    }),
+  });
+  return { number: pr.number, title: pr.title, html_url: pr.html_url, state: pr.state };
+}
+
+async function getFileContent(token, owner, repo, path, ref) {
+  const refQuery = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  const data = await githubRequest(token, `/repos/${owner}/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}${refQuery}`);
+  if (Array.isArray(data) || data.type !== 'file') throw new Error(`Path "${path}" is not a file.`);
+  return {
+    path: data.path,
+    sha: data.sha,
+    size: data.size,
+    content: data.encoding === 'base64' ? base64DecodeUtf8(data.content) : String(data.content ?? ''),
+  };
+}
+
+async function getFileContentOrNull(token, owner, repo, path, ref) {
+  try {
+    return await getFileContent(token, owner, repo, path, ref);
+  } catch (error) {
+    if (String(error?.message ?? '').includes('GitHub API 404')) return null;
+    throw error;
+  }
+}
+
+async function createTreeEntriesForTextFiles(token, owner, repo, files) {
+  return Promise.all(files.map(async (file) => {
+    const blob = await githubRequest(token, `/repos/${owner}/${repo}/git/blobs`, {
+      method: 'POST',
+      body: JSON.stringify({ content: file.content, encoding: 'utf-8' }),
+    });
+    return { path: file.path, mode: '100644', type: 'blob', sha: blob.sha };
+  }));
+}
+
+function parseUnifiedDiff(diff) {
+  const lines = String(diff).replace(/\r\n/g, '\n').split('\n');
+  const files = [];
+  let current = null;
+  let hunk = null;
+
+  for (const line of lines) {
+    if (line.startsWith('--- ')) {
+      current = { oldPath: line.slice(4).trim().replace(/^a\//, ''), newPath: null, hunks: [] };
+      files.push(current);
+      hunk = null;
+      continue;
+    }
+    if (current && line.startsWith('+++ ')) {
+      current.newPath = line.slice(4).trim().replace(/^b\//, '');
+      continue;
+    }
+    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (current && match) {
+      hunk = { oldStart: Number(match[1]), lines: [] };
+      current.hunks.push(hunk);
+      continue;
+    }
+    if (hunk && (/^[ +\-]/.test(line) || line === '\\ No newline at end of file')) {
+      if (!line.startsWith('\\')) hunk.lines.push(line);
+    }
+  }
+
+  return files.filter((file) => file.newPath && file.hunks.length > 0);
+}
+
+function applyDiffHunks(original, hunks, path) {
+  const originalHadFinalNewline = original.endsWith('\n');
+  const originalLines = originalHadFinalNewline ? original.slice(0, -1).split('\n') : (original ? original.split('\n') : []);
+  const output = [];
+  let cursor = 0;
+
+  for (const hunk of hunks) {
+    const target = Math.max(hunk.oldStart - 1, 0);
+    while (cursor < target) output.push(originalLines[cursor++]);
+    for (const rawLine of hunk.lines) {
+      const op = rawLine[0];
+      const text = rawLine.slice(1);
+      if (op === ' ') {
+        if (originalLines[cursor] !== text) throw new Error(`Patch context mismatch in "${path}".`);
+        output.push(originalLines[cursor++]);
+      } else if (op === '-') {
+        if (originalLines[cursor] !== text) throw new Error(`Patch removal mismatch in "${path}".`);
+        cursor += 1;
+      } else if (op === '+') {
+        output.push(text);
+      }
+    }
+  }
+
+  while (cursor < originalLines.length) output.push(originalLines[cursor++]);
+  return `${output.join('\n')}${originalHadFinalNewline ? '\n' : ''}`;
+}
+
+async function fetchJsonFromUrl(sourceUrl, limitBytes = config.requestBodyLimit) {
+  const parsed = new URL(String(sourceUrl));
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('manifest_url must use http or https.');
+  const res = await fetch(parsed, { redirect: 'follow' });
+  if (!res.ok || !res.body) throw new Error(`manifest_url download failed: ${res.status} ${res.statusText}`);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of Readable.fromWeb(res.body)) {
+    size += chunk.length;
+    if (limitEnabled(limitBytes) && size > limitBytes) throw new Error(`Manifest too large. Max ${limitBytes} bytes.`);
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 function textResult(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return { content: [{ type: 'text', text }] };
@@ -725,6 +855,296 @@ const tools = [
         body: JSON.stringify({ title: String(args.title), body: String(args.body ?? ''), head: args.head, base: args.base ?? 'main', draft: Boolean(args.draft) }),
       });
       return textResult({ number: pr.number, title: pr.title, html_url: pr.html_url, state: pr.state });
+    },
+  },
+  {
+    name: 'get_files_batch',
+    description: 'Read multiple text files from one repository ref in a single call.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository in owner/repo format.' },
+        paths: { type: 'array', items: { type: 'string' } },
+        ref: { type: 'string', description: 'Optional branch, tag, or SHA.' },
+      },
+      required: ['repo', 'paths'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      if (!Array.isArray(args.paths) || args.paths.length === 0) throw new Error('paths must be a non-empty array.');
+      if (limitEnabled(config.maxFilesPerCommit) && args.paths.length > Math.max(config.maxFilesPerCommit, 25)) {
+        throw new Error(`Too many paths. Max ${Math.max(config.maxFilesPerCommit, 25)}.`);
+      }
+      const files = [];
+      for (const rawPath of args.paths) {
+        const path = validatePath(rawPath, { allowBinary: true });
+        files.push(await getFileContent(ctx.githubToken, owner, repo, path, args.ref));
+      }
+      return textResult({ repo: `${owner}/${repo}`, ref: args.ref ?? null, files });
+    },
+  },
+  {
+    name: 'list_tree',
+    description: 'List repository tree entries for a branch/ref/SHA, optionally recursive.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository in owner/repo format.' },
+        ref: { type: 'string', default: 'main' },
+        recursive: { type: 'boolean', default: true },
+      },
+      required: ['repo'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const ref = encodeURIComponent(String(args.ref ?? 'main'));
+      const recursive = args.recursive === false ? '' : '?recursive=1';
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/git/trees/${ref}${recursive}`);
+      return textResult({
+        sha: data.sha,
+        truncated: Boolean(data.truncated),
+        tree: (data.tree ?? []).map((item) => ({ path: item.path, type: item.type, mode: item.mode, size: item.size, sha: item.sha })),
+      });
+    },
+  },
+  {
+    name: 'compare_refs',
+    description: 'Compare two refs and return commits plus changed file summaries.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository in owner/repo format.' },
+        base: { type: 'string' },
+        head: { type: 'string' },
+        include_patch: { type: 'boolean', default: false },
+      },
+      required: ['repo', 'base', 'head'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/compare/${encodeURIComponent(args.base)}...${encodeURIComponent(args.head)}`);
+      return textResult({
+        status: data.status,
+        ahead_by: data.ahead_by,
+        behind_by: data.behind_by,
+        commits: (data.commits ?? []).map((commit) => ({ sha: commit.sha, message: commit.commit?.message, html_url: commit.html_url })),
+        files: (data.files ?? []).map((file) => ({
+          filename: file.filename,
+          status: file.status,
+          additions: file.additions,
+          deletions: file.deletions,
+          changes: file.changes,
+          ...(args.include_patch ? { patch: file.patch } : {}),
+        })),
+      });
+    },
+  },
+  {
+    name: 'commit_files',
+    description: 'Commit many UTF-8 text files in one call, optionally creating a new branch first.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        branch: { type: 'string', description: 'Existing target branch, unless new_branch is set.' },
+        base_branch: { type: 'string', default: 'main' },
+        new_branch: { type: 'string', description: 'Optional branch to create before committing.' },
+        files: {
+          type: 'array',
+          items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+        },
+        commit_message: { type: 'string' },
+      },
+      required: ['repo', 'files', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const targetBranch = args.new_branch ? String(args.new_branch) : String(args.branch ?? '');
+      if (!targetBranch) throw new Error('branch or new_branch is required.');
+      if (args.new_branch) await createBranchRef(ctx.githubToken, owner, repo, args.base_branch ?? 'main', targetBranch);
+      validateBranch(targetBranch, { protect: true });
+      const files = validateFiles(args.files);
+      const treeEntries = await createTreeEntriesForTextFiles(ctx.githubToken, owner, repo, files);
+      const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, targetBranch, treeEntries, String(args.commit_message));
+      return textResult({ success: true, repo: `${owner}/${repo}`, branch: targetBranch, files_committed: files.map((file) => file.path), ...commit });
+    },
+  },
+  {
+    name: 'apply_unified_diff',
+    description: 'Apply a unified diff to text files, secret-scan the results, and commit once.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        branch: { type: 'string' },
+        diff: { type: 'string' },
+        commit_message: { type: 'string' },
+      },
+      required: ['repo', 'branch', 'diff', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      validateBranch(args.branch, { protect: true });
+      const patches = parseUnifiedDiff(args.diff);
+      if (patches.length === 0) throw new Error('No file hunks found in diff.');
+      const files = [];
+      const treeEntries = [];
+      for (const patch of patches) {
+        const deleting = patch.newPath === '/dev/null';
+        const path = validatePath(deleting ? patch.oldPath : patch.newPath);
+        if (deleting) {
+          treeEntries.push({ path, mode: '100644', type: 'blob', sha: null });
+          continue;
+        }
+        const existing = patch.oldPath === '/dev/null' ? null : await getFileContentOrNull(ctx.githubToken, owner, repo, path, args.branch);
+        files.push({ path, content: applyDiffHunks(existing?.content ?? '', patch.hunks, path) });
+      }
+      const validated = validateFiles(files);
+      treeEntries.push(...await createTreeEntriesForTextFiles(ctx.githubToken, owner, repo, validated));
+      const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.branch, treeEntries, String(args.commit_message));
+      return textResult({ success: true, repo: `${owner}/${repo}`, branch: args.branch, files_changed: treeEntries.map((entry) => entry.path), ...commit });
+    },
+  },
+  {
+    name: 'create_branch_commit_pr',
+    description: 'Create a branch, commit text files, and open a pull request in one approval-friendly workflow call.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        base_branch: { type: 'string', default: 'main' },
+        new_branch: { type: 'string' },
+        files: {
+          type: 'array',
+          items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+        },
+        commit_message: { type: 'string' },
+        pr_title: { type: 'string' },
+        pr_body: { type: 'string' },
+        draft: { type: 'boolean', default: false },
+      },
+      required: ['repo', 'new_branch', 'files', 'commit_message', 'pr_title'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const base = args.base_branch ?? 'main';
+      await createBranchRef(ctx.githubToken, owner, repo, base, args.new_branch);
+      const files = validateFiles(args.files);
+      const treeEntries = await createTreeEntriesForTextFiles(ctx.githubToken, owner, repo, files);
+      const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.new_branch, treeEntries, String(args.commit_message));
+      const pr = await createPullRequest(ctx.githubToken, owner, repo, {
+        title: args.pr_title,
+        body: args.pr_body,
+        head: args.new_branch,
+        base,
+        draft: args.draft,
+      });
+      return textResult({ success: true, repo: `${owner}/${repo}`, branch: args.new_branch, files_committed: files.map((file) => file.path), commit, pull_request: pr });
+    },
+  },
+  {
+    name: 'commit_files_from_manifest_url',
+    description: 'Download a JSON manifest of files/source_url entries and commit all blobs in one call.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        branch: { type: 'string' },
+        manifest_url: { type: 'string', description: 'HTTP(S) JSON: {"files":[{"path":"...","source_url":"..."}]}' },
+        commit_message: { type: 'string' },
+      },
+      required: ['repo', 'branch', 'manifest_url', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      validateBranch(args.branch, { protect: true });
+      const manifest = await fetchJsonFromUrl(args.manifest_url);
+      const items = manifest?.files;
+      if (!Array.isArray(items) || items.length === 0) throw new Error('manifest.files must be a non-empty array.');
+      if (limitEnabled(config.maxFilesPerCommit) && items.length > config.maxFilesPerCommit) throw new Error(`Too many files. Max ${config.maxFilesPerCommit}.`);
+      const downloads = [];
+      let totalBytes = 0;
+      try {
+        const treeEntries = [];
+        for (const item of items) {
+          const path = validatePath(item?.path, { allowBinary: config.allowBinary });
+          const downloaded = await downloadSourceToTemp(item?.source_url, path);
+          downloads.push(downloaded);
+          totalBytes += downloaded.bytes;
+          if (limitEnabled(config.maxBytesPerCommit) && totalBytes > config.maxBytesPerCommit) throw new Error(`Commit payload is too large. Max ${config.maxBytesPerCommit} bytes.`);
+          const isBinary = sampleLooksBinary(downloaded.sample, downloaded.contentType);
+          if (isBinary && !config.allowBinary) throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true.`);
+          if (!isBinary) await scanTextFileForSecrets(downloaded.tempPath, path);
+          const blob = await createBlobFromFile(ctx.githubToken, owner, repo, downloaded.tempPath);
+          treeEntries.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
+        }
+        const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.branch, treeEntries, String(args.commit_message));
+        return textResult({ success: true, repo: `${owner}/${repo}`, branch: args.branch, files_committed: treeEntries.map((entry) => entry.path), bytes: totalBytes, ...commit });
+      } finally {
+        await Promise.all(downloads.flatMap((item) => [
+          rm(item.tempPath, { force: true }),
+          rm(item.tempDir, { recursive: true, force: true }),
+        ]));
+      }
+    },
+  },
+  {
+    name: 'update_pull_request',
+    description: 'Update pull request title, body, base branch, or open/closed state.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        title: { type: 'string' },
+        body: { type: 'string' },
+        base: { type: 'string' },
+        state: { type: 'string', enum: ['open', 'closed'] },
+      },
+      required: ['repo', 'number'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls/${Number(args.number)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...(args.title ? { title: String(args.title) } : {}),
+          ...(args.body !== undefined ? { body: String(args.body) } : {}),
+          ...(args.base ? { base: String(args.base) } : {}),
+          ...(args.state ? { state: String(args.state) } : {}),
+        }),
+      });
+      return textResult({ number: data.number, title: data.title, state: data.state, html_url: data.html_url });
+    },
+  },
+  {
+    name: 'comment_pull_request',
+    description: 'Add a top-level conversation comment to a pull request.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        body: { type: 'string' },
+      },
+      required: ['repo', 'number', 'body'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/issues/${Number(args.number)}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body: String(args.body) }),
+      });
+      return textResult({ id: data.id, html_url: data.html_url });
     },
   },
   {
