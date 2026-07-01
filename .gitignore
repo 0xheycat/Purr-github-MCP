@@ -1,0 +1,43 @@
+# dependencies
+node_modules/
+
+# runtime/build output
+dist/
+build/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# environment/secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+
+# logs/temp
+*.log
+*.pid
+.DS_Store
+tmp/
+temp/
+
+# local editors/agents
+.vscode/
+.idea/
+.claude/
+.z-ai-config
+tool-results/
+
+# archives/database artifacts
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
