@@ -1,0 +1,6 @@
+interface:
+  display_name: "Purr Github MCP"
+  short_description: "Repo-specific patterns and workflows for Purr-github-MCP"
+  default_prompt: "Use the Purr-github-MCP repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
