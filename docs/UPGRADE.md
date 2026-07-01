@@ -1,80 +1,150 @@
-# purr-github-MCP - Upgrade: Extended Tools + Unlimited Config
+# purr-github-MCP - Upgrade: Extended Tools + Large Files
 
-This upgrade adds an extended tool pack (`src/extensions.js`) and documents how to
-remove push limits via environment variables. No existing behavior changes until you
-wire in the new tools and redeploy.
+This upgrade wires in the extended tool pack and adds a large-file path that does
+not send giant base64 payloads through MCP JSON-RPC.
 
-## 1. Wire in the extended tools
+## Design decision
 
-Edit `src/server.js`:
+Chosen strategy: `source_url` ingestion.
 
-```js
-// near the other imports at the top
-import { extraTools } from './extensions.js';
+The client provides a reachable HTTP(S) URL, then the MCP server downloads the
+file server-side into a temporary file, validates size/path/binary policy, scans
+text files for secret-like content, and streams a base64 JSON blob body to the
+GitHub Git Data API.
 
-// where `const tools = [ ... ]` ends, append the extra tools:
-const tools = [
-  // ...all existing tool objects...
-  ...extraTools,
-];
-```
+| Path | Best for | Request body | Server memory | Limit |
+| --- | --- | --- | --- | --- |
+| `commit_small_text_files` | normal text edits | inline JSON | buffers request body | env limits |
+| `commit_large_file_from_url` | large text or binary files | small JSON with URL | streams via temp file | max 100MB GitHub blob |
+| Git LFS | files above 100MB or recurring large binaries | pointer file | external LFS storage | required above GitHub blob cap |
 
-Optional: expose annotations in `tools/list` so read-only tools can be
-auto-approved by clients:
+Alternatives considered:
 
-```js
-function toolDefinitions() {
-  return tools.map(({ name, description, inputSchema, annotations }) => ({
-    name, description, inputSchema, ...(annotations ? { annotations } : {}),
-  }));
+- Chunked/multipart endpoint: useful, but it adds a non-MCP upload lifecycle and
+  state cleanup surface. `source_url` is simpler for mcp-use.com and Notion.
+- Git LFS pointer flow: correct above 100MB, but GitHub's LFS upload API/auth
+  flow is separate from the normal Git Data API. This server documents when LFS
+  is required instead of faking support.
+
+GitHub warns on repository blobs larger than 50MB and blocks Git blobs above
+100,000,000 bytes. Above that, use Git LFS.
+
+## New and wired tools
+
+Read-only:
+
+- `list_commits`
+- `get_commit`
+- `list_branches`
+- `list_pull_request_files`
+- `search_code`
+
+Write:
+
+- `update_file`
+- `delete_file`
+- `merge_pull_request`
+- `commit_large_file_from_url`
+
+All tools now expose MCP `annotations` through `tools/list`. Read tools set
+`readOnlyHint:true`. Delete, merge, overwrite, and commit tools set
+`destructiveHint:true` where approval should be requested by the client. The
+server does not fake read-only hints on write tools.
+
+## Large-file usage
+
+Call `commit_large_file_from_url`:
+
+```json
+{
+  "repo": "0xheycat/Purr-github-MCP",
+  "branch": "feat/assets",
+  "path": "assets/demo.zip",
+  "source_url": "https://example.com/demo.zip",
+  "commit_message": "Add demo asset"
 }
 ```
 
-## 2. New tools
+Rules:
 
-Read-only (safe to auto-approve):
-- `list_commits` - commit history for a branch/ref, optional path filter
-- `get_commit` - single commit with changed files + patch
-- `list_branches` - branches + protection flag
-- `list_pull_request_files` - PR diff (files, patch, status)
-- `search_code` - code search within the repo
+- `source_url` must be `http` or `https` and reachable by the deployed server.
+- Binary-looking files require `ALLOW_BINARY=true`.
+- Text files are still secret-scanned before GitHub upload.
+- The server stores the download in a temporary file and removes it after the
+  commit attempt.
+- GitHub still receives base64 JSON, because that is how the Git blob API works,
+  but the body is streamed from disk instead of built as one huge in-memory
+  string.
 
-Write:
-- `update_file` - create/update one text file (needs sha to replace)
-- `delete_file` - delete a file (needs sha)
-- `merge_pull_request` - merge a PR (merge/squash/rebase)
+## Environment variables
 
-## 3. Remove push limits (env only, no code change)
-
-Set these on your host (for example the deploy env), then redeploy:
+`0` or empty disables the server-side limit where noted.
 
 ```bash
-PROTECTED_BRANCHES=          # empty = allow direct commits to any branch
-BRANCH_PREFIXES=             # empty = any branch name allowed
-MAX_FILES_PER_COMMIT=100
-MAX_BYTES_PER_COMMIT=1000000
-MAX_BYTES_PER_FILE=1000000
-ALLOW_PROTECTED_WRITES=true  # let extended write tools touch protected branches
+# Auth
+AUTH_MODE=passthrough
+SERVER_TOKEN=
+GITHUB_TOKEN=
+
+# Scope
+ALLOWED_REPOS=0xheycat/Purr-github-MCP
+
+# Request and GitHub endpoints
+REQUEST_BODY_LIMIT=1000000
+GITHUB_API_BASE=https://api.github.com
+
+# Branch/path safety
+PROTECTED_BRANCHES=main,master,production,staging,release
+BRANCH_PREFIXES=feat/,fix/,docs/,chore/,refactor/,test/,perf/
+ALLOW_PROTECTED_WRITES=false
+ALLOW_WORKFLOW_WRITES=false
+
+# Commit limits
+MAX_FILES_PER_COMMIT=5
+MAX_BYTES_PER_COMMIT=100000000
+MAX_BYTES_PER_FILE=100000000
+
+# Binary large files
+ALLOW_BINARY=true
 ```
 
-## 4. Hard cap that still needs a code change
+For mcp-use.com large-file deploys, keep `REQUEST_BODY_LIMIT` small unless you
+also need inline text commits above 1MB. Prefer `source_url` for large files:
 
-`readBody()` in `src/server.js` caps each HTTP request at ~1 MB:
-
-```js
-function readBody(req, limitBytes = 1_000_000) {
+```bash
+REQUEST_BODY_LIMIT=1000000
+MAX_BYTES_PER_FILE=100000000
+MAX_BYTES_PER_COMMIT=100000000
+MAX_FILES_PER_COMMIT=0
+ALLOW_BINARY=true
+PROTECTED_BRANCHES=main,master,production,staging,release
+BRANCH_PREFIXES=feat/,fix/,docs/,chore/,refactor/,test/,perf/
+ALLOW_PROTECTED_WRITES=false
+ALLOW_WORKFLOW_WRITES=false
+GITHUB_API_BASE=https://api.github.com
 ```
 
-Raise `limitBytes` (for example `10_000_000`) if you need larger single pushes.
+## Migration / deploy
 
-## 5. Kept ON by design - secret scanning
+1. Deploy this branch or merge the PR.
+2. Set the mcp-use.com environment variables above.
+3. Redeploy/restart the mcp-use.com service.
+4. Reconnect the MCP connection in Notion so it refreshes `tools/list` and sees
+   the new annotations.
+5. Use `commit_large_file_from_url` for large files instead of embedding file
+   content in JSON-RPC.
 
-`containsSecretLikeContent()` stays enabled. Because this repo is public, committing
-secrets would leak them to everyone. The extended write tools reuse the same guard.
-Leave it on.
+## Validation
 
-## 6. Auto-approval (client side)
+Run:
 
-Auto-approval is a client setting, not server code. In Notion, open the MCP
-connection settings and choose which tools run without confirmation. The
-`readOnlyHint` annotations above help clients auto-approve read-only tools.
+```bash
+npm run check
+```
+
+The smoke test starts local mock GitHub and source servers and verifies:
+
+- `tools/list` exposes annotations.
+- text secret scanning still blocks a secret-like payload.
+- an inline JSON-RPC commit above 1MB works when `REQUEST_BODY_LIMIT` is raised.
+- the 80MB `source_url` large-file path reaches the mock GitHub blob endpoint.

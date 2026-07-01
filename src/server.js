@@ -1,8 +1,17 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, open, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { extraTools } from './extensions.js';
 
 const VERSION = '1.0.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
+const GITHUB_BLOB_HARD_LIMIT_BYTES = 100_000_000;
+const GITHUB_LARGE_FILE_WARNING_BYTES = 50_000_000;
+const SAMPLE_BYTES = 8192;
 
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
@@ -10,9 +19,15 @@ function env(key, fallback = '') {
 
 function envInt(key, fallback) {
   const raw = process.env[key];
-  if (!raw) return fallback;
+  if (raw === undefined || raw === '') return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function envBool(key, fallback = false) {
+  const raw = process.env[key];
+  if (raw === undefined || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
 }
 
 function splitList(raw = '') {
@@ -29,12 +44,17 @@ const config = {
   serverToken: env('SERVER_TOKEN'),
   githubToken: env('GITHUB_TOKEN'),
   corsOrigin: env('CORS_ORIGIN', '*'),
+  githubApiBase: env('GITHUB_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
   allowedRepos: splitList(env('ALLOWED_REPOS')),
   protectedBranches: new Set(splitList(env('PROTECTED_BRANCHES', 'main,master,production,staging,release'))),
   branchPrefixes: splitList(env('BRANCH_PREFIXES', 'feat/,fix/,docs/,chore/,refactor/,test/,perf/')),
   maxFilesPerCommit: envInt('MAX_FILES_PER_COMMIT', 5),
   maxBytesPerCommit: envInt('MAX_BYTES_PER_COMMIT', 50_000),
   maxBytesPerFile: envInt('MAX_BYTES_PER_FILE', 30_000),
+  requestBodyLimit: envInt('REQUEST_BODY_LIMIT', 1_000_000),
+  allowProtectedWrites: envBool('ALLOW_PROTECTED_WRITES', false),
+  allowBinary: envBool('ALLOW_BINARY', false),
+  allowWorkflowWrites: envBool('ALLOW_WORKFLOW_WRITES', false),
 };
 
 const sessions = new Map();
@@ -81,7 +101,11 @@ function closeSession(sessionId) {
   sessions.delete(sessionId);
 }
 
-function readBody(req, limitBytes = 1_000_000) {
+function limitEnabled(value) {
+  return Number.isFinite(value) && value > 0;
+}
+
+function readBody(req, limitBytes = config.requestBodyLimit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -146,7 +170,7 @@ function validateBranch(branch, { requirePrefix = false, protect = true } = {}) 
   if (branch.includes('..') || branch.startsWith('/') || branch.endsWith('/') || branch.includes('\\')) {
     throw new Error('Invalid branch name: unsafe path sequence.');
   }
-  if (protect && config.protectedBranches.has(branch)) {
+  if (protect && !config.allowProtectedWrites && config.protectedBranches.has(branch)) {
     throw new Error(`Branch "${branch}" is protected. Use a feature branch instead.`);
   }
   if (requirePrefix && config.branchPrefixes.length > 0 && !config.branchPrefixes.some((prefix) => branch.startsWith(prefix))) {
@@ -154,7 +178,7 @@ function validateBranch(branch, { requirePrefix = false, protect = true } = {}) 
   }
 }
 
-function validatePath(filePath) {
+function validatePath(filePath, { allowBinary = false } = {}) {
   if (typeof filePath !== 'string' || !filePath.trim()) {
     throw new Error('File path is required.');
   }
@@ -166,9 +190,11 @@ function validatePath(filePath) {
     '.env', '.env.local', '.env.production', '.env.development',
     'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
   ]);
-  const deniedPrefixes = ['.github/workflows/', 'node_modules/', 'dist/', 'build/', '.next/', '.ssh/', 'terraform/', 'k8s/', 'kubernetes/'];
+  const deniedPrefixes = ['node_modules/', 'dist/', 'build/', '.next/', '.ssh/', 'terraform/', 'k8s/', 'kubernetes/'];
+  if (!config.allowWorkflowWrites) deniedPrefixes.unshift('.github/workflows/');
   const deniedSuffixes = ['.pem', '.key', '.p12', '.pfx', '.db', '.sqlite', '.zip', '.rar', '.7z', '.tar', '.tar.gz', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'];
-  if (deniedExact.has(normalized) || deniedPrefixes.some((prefix) => normalized.startsWith(prefix)) || deniedSuffixes.some((suffix) => normalized.toLowerCase().endsWith(suffix))) {
+  const deniedBySuffix = !allowBinary && deniedSuffixes.some((suffix) => normalized.toLowerCase().endsWith(suffix));
+  if (deniedExact.has(normalized) || deniedPrefixes.some((prefix) => normalized.startsWith(prefix)) || deniedBySuffix) {
     throw new Error(`Path "${filePath}" is denied by safety policy.`);
   }
   return normalized;
@@ -190,7 +216,7 @@ function validateFiles(files) {
   if (!Array.isArray(files) || files.length === 0) {
     throw new Error('files must be a non-empty array.');
   }
-  if (files.length > config.maxFilesPerCommit) {
+  if (limitEnabled(config.maxFilesPerCommit) && files.length > config.maxFilesPerCommit) {
     throw new Error(`Too many files. Max ${config.maxFilesPerCommit}.`);
   }
 
@@ -201,7 +227,7 @@ function validateFiles(files) {
     const bytes = Buffer.byteLength(content, 'utf8');
     totalBytes += bytes;
 
-    if (bytes > config.maxBytesPerFile) {
+    if (limitEnabled(config.maxBytesPerFile) && bytes > config.maxBytesPerFile) {
       throw new Error(`File "${path}" is too large. Max ${config.maxBytesPerFile} bytes.`);
     }
     if (content.includes('\0')) {
@@ -213,7 +239,7 @@ function validateFiles(files) {
     return { path, content };
   });
 
-  if (totalBytes > config.maxBytesPerCommit) {
+  if (limitEnabled(config.maxBytesPerCommit) && totalBytes > config.maxBytesPerCommit) {
     throw new Error(`Payload too large. Max ${config.maxBytesPerCommit} bytes.`);
   }
 
@@ -226,9 +252,10 @@ function validateFiles(files) {
 }
 
 async function githubRequest(token, route, options = {}) {
-  const url = `https://api.github.com${route}`;
+  const url = `${config.githubApiBase}${route}`;
   const res = await fetch(url, {
     ...options,
+    ...(options.body && typeof options.body !== 'string' ? { duplex: 'half' } : {}),
     headers: {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${token}`,
@@ -245,6 +272,125 @@ async function githubRequest(token, route, options = {}) {
     throw new Error(`GitHub API ${res.status}: ${message}`);
   }
   return data;
+}
+
+function assertLargeFileSize(size, path) {
+  if (size > GITHUB_BLOB_HARD_LIMIT_BYTES) {
+    throw new Error(`File "${path}" is ${size} bytes. GitHub blobs are limited to 100000000 bytes; use Git LFS above that.`);
+  }
+  if (limitEnabled(config.maxBytesPerFile) && size > config.maxBytesPerFile) {
+    throw new Error(`File "${path}" is too large. Max ${config.maxBytesPerFile} bytes (raise MAX_BYTES_PER_FILE, max 100000000).`);
+  }
+  if (limitEnabled(config.maxBytesPerCommit) && size > config.maxBytesPerCommit) {
+    throw new Error(`Commit payload is too large. Max ${config.maxBytesPerCommit} bytes (raise MAX_BYTES_PER_COMMIT).`);
+  }
+}
+
+async function downloadSourceToTemp(sourceUrl, path) {
+  let parsed;
+  try {
+    parsed = new URL(String(sourceUrl));
+  } catch {
+    throw new Error('source_url must be a valid http(s) URL.');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('source_url must use http or https.');
+  }
+
+  const limit = limitEnabled(config.maxBytesPerFile)
+    ? Math.min(config.maxBytesPerFile, GITHUB_BLOB_HARD_LIMIT_BYTES)
+    : GITHUB_BLOB_HARD_LIMIT_BYTES;
+  const tempDir = await mkdtemp(join(tmpdir(), 'purr-github-mcp-'));
+  const tempPath = join(tempDir, `${Date.now()}-${randomUUID()}.upload`);
+  const file = await open(tempPath, 'w');
+
+  const res = await fetch(parsed, { redirect: 'follow' });
+  if (!res.ok || !res.body) {
+    await file.close();
+    await rm(tempPath, { force: true });
+    throw new Error(`source_url download failed: ${res.status} ${res.statusText}`);
+  }
+
+  const declaredLength = Number.parseInt(res.headers.get('content-length') ?? '', 10);
+  if (Number.isFinite(declaredLength)) assertLargeFileSize(declaredLength, path);
+
+  let bytes = 0;
+  const sampleChunks = [];
+  let sampleSize = 0;
+  try {
+    for await (const chunk of Readable.fromWeb(res.body)) {
+      bytes += chunk.length;
+      if (bytes > limit) {
+        throw new Error(`File "${path}" is too large. Max ${limit} bytes.`);
+      }
+      if (sampleSize < SAMPLE_BYTES) {
+        const needed = Math.min(chunk.length, SAMPLE_BYTES - sampleSize);
+        sampleChunks.push(chunk.subarray(0, needed));
+        sampleSize += needed;
+      }
+      await file.write(chunk);
+    }
+  } finally {
+    await file.close();
+  }
+
+  assertLargeFileSize(bytes, path);
+  return {
+    tempDir,
+    tempPath,
+    bytes,
+    contentType: res.headers.get('content-type') ?? '',
+    sample: Buffer.concat(sampleChunks),
+  };
+}
+
+function sampleLooksBinary(sample, contentType = '') {
+  if (sample.includes(0)) return true;
+  if (/^(image|audio|video|application\/(zip|gzip|x-7z|octet-stream|pdf))/i.test(contentType)) return true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(sample);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+async function scanTextFileForSecrets(path, displayPath) {
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let carry = '';
+  for await (const chunk of createReadStream(path)) {
+    const text = decoder.decode(chunk, { stream: true });
+    const window = carry + text;
+    if (containsSecretLikeContent(window)) {
+      throw new Error(`File "${displayPath}" appears to contain a secret/token. Commit blocked.`);
+    }
+    carry = window.slice(-2048);
+  }
+  const tail = carry + decoder.decode();
+  if (containsSecretLikeContent(tail)) {
+    throw new Error(`File "${displayPath}" appears to contain a secret/token. Commit blocked.`);
+  }
+}
+
+async function* base64JsonBodyFromFile(path) {
+  yield '{"content":"';
+  let remainder = Buffer.alloc(0);
+  for await (const chunk of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
+    const data = remainder.length ? Buffer.concat([remainder, chunk]) : chunk;
+    const wholeLength = data.length - (data.length % 3);
+    if (wholeLength > 0) yield data.subarray(0, wholeLength).toString('base64');
+    remainder = wholeLength < data.length ? data.subarray(wholeLength) : Buffer.alloc(0);
+  }
+  if (remainder.length) yield remainder.toString('base64');
+  yield '","encoding":"base64"}';
+}
+
+async function createBlobFromFile(token, owner, repo, filePath) {
+  return githubRequest(token, `/repos/${owner}/${repo}/git/blobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: Readable.from(base64JsonBodyFromFile(filePath)),
+  });
 }
 
 function base64EncodeUtf8(input) {
@@ -289,6 +435,27 @@ async function createTreeCommitAndUpdate(token, owner, repo, branch, files, comm
   return { commitSha: commit.sha, commitUrl: commit.html_url ?? `https://github.com/${owner}/${repo}/commit/${commit.sha}` };
 }
 
+async function createCommitFromTreeEntries(token, owner, repo, branch, treeEntries, commitMessage) {
+  const parentSha = await getBranchSha(token, owner, repo, branch);
+  const parentCommit = await githubRequest(token, `/repos/${owner}/${repo}/git/commits/${parentSha}`);
+  const tree = await githubRequest(token, `/repos/${owner}/${repo}/git/trees`, {
+    method: 'POST',
+    body: JSON.stringify({ base_tree: parentCommit.tree.sha, tree: treeEntries }),
+  });
+
+  const commit = await githubRequest(token, `/repos/${owner}/${repo}/git/commits`, {
+    method: 'POST',
+    body: JSON.stringify({ message: commitMessage, tree: tree.sha, parents: [parentSha] }),
+  });
+
+  await githubRequest(token, `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ sha: commit.sha, force: false }),
+  });
+
+  return { commitSha: commit.sha, commitUrl: commit.html_url ?? `https://github.com/${owner}/${repo}/commit/${commit.sha}` };
+}
+
 function textResult(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return { content: [{ type: 'text', text }] };
@@ -298,6 +465,7 @@ const tools = [
   {
     name: 'get_authenticated_user',
     description: 'Return the GitHub account for the Bearer token currently used by this MCP request.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: { type: 'object', properties: {} },
     handler: async (_args, ctx) => {
       const user = await githubRequest(ctx.githubToken, '/user');
@@ -307,6 +475,7 @@ const tools = [
   {
     name: 'get_repository',
     description: 'Fetch repository metadata for an owner/repo repository.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: { repo: { type: 'string', description: 'Repository in owner/repo format.' } },
@@ -329,6 +498,7 @@ const tools = [
   {
     name: 'list_issues',
     description: 'List repository issues. Pull requests are excluded from the returned list.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -351,6 +521,7 @@ const tools = [
   {
     name: 'list_pull_requests',
     description: 'List pull requests for a repository.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -371,6 +542,7 @@ const tools = [
   {
     name: 'get_file',
     description: 'Read a small text file from a repository branch or ref.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -393,6 +565,7 @@ const tools = [
   {
     name: 'list_directory',
     description: 'List files and folders at a repository path.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -415,6 +588,7 @@ const tools = [
   {
     name: 'create_issue',
     description: 'Create a GitHub issue.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -437,6 +611,7 @@ const tools = [
   {
     name: 'create_branch',
     description: 'Create a new branch from an existing base branch. New branch must use a safe prefix.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -462,6 +637,7 @@ const tools = [
   {
     name: 'commit_small_text_files',
     description: 'Commit up to 5 small text files to an existing non-protected branch. Secret-like content and unsafe paths are blocked.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -490,6 +666,7 @@ const tools = [
   {
     name: 'create_branch_and_commit',
     description: 'Create a prefixed feature/fix branch from a base branch and commit up to 5 small text files.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -526,6 +703,7 @@ const tools = [
   {
     name: 'create_pull_request',
     description: 'Open a pull request from an existing head branch into a base branch.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -549,10 +727,65 @@ const tools = [
       return textResult({ number: pr.number, title: pr.title, html_url: pr.html_url, state: pr.state });
     },
   },
+  {
+    name: 'commit_large_file_from_url',
+    description: 'Download one large file from source_url server-side, create a Git blob, and commit it to an existing branch. Binary files require ALLOW_BINARY=true.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository in owner/repo format.' },
+        branch: { type: 'string', description: 'Existing target branch. Protected branches require ALLOW_PROTECTED_WRITES=true.' },
+        path: { type: 'string', description: 'Repository file path to create or overwrite.' },
+        source_url: { type: 'string', description: 'HTTP(S) URL that the server can download. Avoid giant JSON-RPC payloads.' },
+        commit_message: { type: 'string' },
+      },
+      required: ['repo', 'branch', 'path', 'source_url', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      validateBranch(args.branch, { protect: true });
+      const path = validatePath(args.path, { allowBinary: config.allowBinary });
+      let downloaded;
+      try {
+        downloaded = await downloadSourceToTemp(args.source_url, path);
+        const isBinary = sampleLooksBinary(downloaded.sample, downloaded.contentType);
+        if (isBinary && !config.allowBinary) {
+          throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true to enable binary large-file commits.`);
+        }
+        if (!isBinary) await scanTextFileForSecrets(downloaded.tempPath, path);
+        const blob = await createBlobFromFile(ctx.githubToken, owner, repo, downloaded.tempPath);
+        const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.branch, [
+          { path, mode: '100644', type: 'blob', sha: blob.sha },
+        ], String(args.commit_message));
+        return textResult({
+          success: true,
+          repo: `${owner}/${repo}`,
+          branch: args.branch,
+          path,
+          bytes: downloaded.bytes,
+          binary: isBinary,
+          github_warning: downloaded.bytes > GITHUB_LARGE_FILE_WARNING_BYTES
+            ? 'GitHub warns on blobs larger than 50MB and blocks blobs above 100MB. Use Git LFS if this grows further.'
+            : undefined,
+          ...commit,
+        });
+      } finally {
+        if (downloaded?.tempPath) await rm(downloaded.tempPath, { force: true });
+        if (downloaded?.tempDir) await rm(downloaded.tempDir, { recursive: true, force: true });
+      }
+    },
+  },
+  ...extraTools,
 ];
 
 function toolDefinitions() {
-  return tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+  return tools.map(({ name, description, inputSchema, annotations }) => ({
+    name,
+    description,
+    inputSchema,
+    ...(annotations ? { annotations } : {}),
+  }));
 }
 
 async function handleRpc(msg, ctx) {
@@ -690,7 +923,7 @@ async function handleRequest(req, res) {
 
   let body;
   try {
-    body = JSON.parse(await readBody(req));
+    body = JSON.parse(await readBody(req, config.requestBodyLimit));
   } catch (error) {
     return sendJson(res, 400, { error: error?.message ?? 'Invalid JSON body.' });
   }

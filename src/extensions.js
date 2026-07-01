@@ -11,14 +11,12 @@
 
 import { Buffer } from 'node:buffer';
 
-const GITHUB_API = 'https://api.github.com';
-
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
 }
 function envInt(key, fallback) {
   const raw = process.env[key];
-  if (!raw) return fallback;
+  if (raw === undefined || raw === '') return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -27,11 +25,17 @@ function splitList(raw = '') {
 }
 
 const config = {
+  githubApiBase: env('GITHUB_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
   allowedRepos: splitList(env('ALLOWED_REPOS')),
   protectedBranches: new Set(splitList(env('PROTECTED_BRANCHES', 'main,master,production,staging,release'))),
   maxBytesPerFile: envInt('MAX_BYTES_PER_FILE', 30000),
   allowProtectedWrites: env('ALLOW_PROTECTED_WRITES', 'false').toLowerCase() === 'true',
+  allowWorkflowWrites: env('ALLOW_WORKFLOW_WRITES', 'false').toLowerCase() === 'true',
 };
+
+function limitEnabled(value) {
+  return Number.isFinite(value) && value > 0;
+}
 
 function validateRepo(repo) {
   if (typeof repo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
@@ -51,6 +55,23 @@ function assertBranchWritable(branch) {
   }
 }
 
+function validatePath(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error('File path is required.');
+  }
+  const normalized = filePath.replace(/^\/+/, '');
+  if (normalized.includes('..') || (normalized.startsWith('.') && normalized.match(/^\.(env|ssh|aws|npmrc)/i))) {
+    throw new Error('Path "' + filePath + '" is not allowed.');
+  }
+  const deniedExact = new Set(['.env', '.env.local', '.env.production', '.env.development']);
+  const deniedPrefixes = ['node_modules/', 'dist/', 'build/', '.next/', '.ssh/'];
+  if (!config.allowWorkflowWrites) deniedPrefixes.unshift('.github/workflows/');
+  if (deniedExact.has(normalized) || deniedPrefixes.some((prefix) => normalized.startsWith(prefix))) {
+    throw new Error('Path "' + filePath + '" is denied by safety policy.');
+  }
+  return normalized;
+}
+
 function containsSecretLikeContent(content) {
   const patterns = [
     /ghp_[A-Za-z0-9_]{20,}/,
@@ -65,7 +86,7 @@ function containsSecretLikeContent(content) {
 
 function guardContent(path, content) {
   const bytes = Buffer.byteLength(content, 'utf8');
-  if (bytes > config.maxBytesPerFile) {
+  if (limitEnabled(config.maxBytesPerFile) && bytes > config.maxBytesPerFile) {
     throw new Error('File "' + path + '" is too large. Max ' + config.maxBytesPerFile + ' bytes (raise MAX_BYTES_PER_FILE).');
   }
   if (content.includes('\0')) throw new Error('File "' + path + '" looks binary. Only text files are allowed.');
@@ -75,7 +96,7 @@ function guardContent(path, content) {
 }
 
 async function gh(token, route, options = {}) {
-  const res = await fetch(GITHUB_API + route, {
+  const res = await fetch(config.githubApiBase + route, {
     ...options,
     headers: {
       Accept: 'application/vnd.github+json',
@@ -106,7 +127,7 @@ export const extraTools = [
   {
     name: 'list_commits',
     description: 'List commits on a branch or ref, optionally filtered by file path.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -136,7 +157,7 @@ export const extraTools = [
   {
     name: 'get_commit',
     description: 'Get a single commit including changed files and patch stats.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -161,7 +182,7 @@ export const extraTools = [
   {
     name: 'list_branches',
     description: 'List branches for a repository with protection flag.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -180,7 +201,7 @@ export const extraTools = [
   {
     name: 'list_pull_request_files',
     description: 'List files changed in a pull request with patch and status.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,7 +221,7 @@ export const extraTools = [
   {
     name: 'search_code',
     description: 'Search code within a repository using GitHub code search syntax.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -221,7 +242,7 @@ export const extraTools = [
   {
     name: 'update_file',
     description: 'Create or update a single text file on a branch. Provide sha when replacing an existing file.',
-    annotations: { readOnlyHint: false, destructiveHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -237,7 +258,7 @@ export const extraTools = [
     handler: async (args, ctx) => {
       const { owner, repo } = validateRepo(args.repo);
       assertBranchWritable(args.branch);
-      const path = String(args.path);
+      const path = validatePath(args.path);
       const content = String(args.content);
       guardContent(path, content);
       const body = {
@@ -256,7 +277,7 @@ export const extraTools = [
   {
     name: 'delete_file',
     description: 'Delete a file from a branch. Requires the current blob sha.',
-    annotations: { readOnlyHint: false, destructiveHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -271,7 +292,7 @@ export const extraTools = [
     handler: async (args, ctx) => {
       const { owner, repo } = validateRepo(args.repo);
       assertBranchWritable(args.branch);
-      const path = String(args.path);
+      const path = validatePath(args.path);
       const data = await gh(ctx.githubToken, '/repos/' + owner + '/' + repo + '/contents/' + encPath(path), {
         method: 'DELETE',
         body: JSON.stringify({ message: String(args.message), sha: String(args.sha), branch: String(args.branch) }),
@@ -282,7 +303,7 @@ export const extraTools = [
   {
     name: 'merge_pull_request',
     description: 'Merge a pull request. Merge method defaults to merge.',
-    annotations: { readOnlyHint: false, destructiveHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
