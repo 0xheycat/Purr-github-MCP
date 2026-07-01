@@ -160,8 +160,9 @@ try {
   }
   const getFile = tools.find((tool) => tool.name === 'get_file');
   const deleteFile = tools.find((tool) => tool.name === 'delete_file');
-  if (getFile?.annotations?.readOnlyHint !== true || deleteFile?.annotations?.destructiveHint !== true) {
-    throw new Error(`Tool annotations are missing or incorrect: ${JSON.stringify({ getFile, deleteFile })}`);
+  const verifyMcp = tools.find((tool) => tool.name === 'verify_mcp_deploy');
+  if (getFile?.annotations?.readOnlyHint !== true || deleteFile?.annotations?.destructiveHint !== true || verifyMcp?.annotations?.readOnlyHint !== true) {
+    throw new Error(`Tool annotations are missing or incorrect: ${JSON.stringify({ getFile, deleteFile, verifyMcp })}`);
   }
 
   const secret = await callTool('commit_small_text_files', {

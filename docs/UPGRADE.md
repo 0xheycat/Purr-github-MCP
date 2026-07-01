@@ -41,6 +41,9 @@ Read-only:
 - `get_files_batch`
 - `list_tree`
 - `compare_refs`
+- `get_verification_plan`
+- `verify_mcp_deploy`
+- `compare_and_verify_pr`
 
 Write:
 
@@ -54,6 +57,7 @@ Write:
 - `commit_files_from_manifest_url`
 - `update_pull_request`
 - `comment_pull_request`
+- `create_verification_comment`
 
 All tools now expose MCP `annotations` through `tools/list`. Read tools set
 `readOnlyHint:true`. Delete, merge, overwrite, and commit tools set
@@ -75,6 +79,13 @@ Use these tools to avoid approval prompts per small operation:
   manifest, useful for generated assets.
 - `update_pull_request` and `comment_pull_request`: PR housekeeping without
   leaving the MCP flow.
+- `get_verification_plan`: inspect package metadata and recommend local commands.
+- `verify_mcp_deploy`: live-check root, health, initialize, tools/list, and
+  annotation exposure for a deployed MCP URL.
+- `compare_and_verify_pr`: compare refs and recommend verification commands when
+  GitHub Actions is unavailable.
+- `create_verification_comment`: post manual/local verification results back to
+  a PR.
 
 Recommended auto-approval policy: auto-approve read-only tools only. Keep write
 workflow tools as a single confirmation boundary instead of approving each file.

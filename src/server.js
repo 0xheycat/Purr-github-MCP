@@ -586,6 +586,34 @@ async function fetchJsonFromUrl(sourceUrl, limitBytes = config.requestBodyLimit)
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+function packageManagerFromFiles(files) {
+  const paths = new Set(files.map((file) => file.path));
+  if (paths.has('bun.lockb') || paths.has('bun.lock')) return 'bun';
+  if (paths.has('pnpm-lock.yaml')) return 'pnpm';
+  if (paths.has('yarn.lock')) return 'yarn';
+  if (paths.has('package-lock.json')) return 'npm';
+  return 'npm';
+}
+
+function verificationCommands(packageManager, scripts = {}) {
+  const run = packageManager === 'npm' ? 'npm run' : `${packageManager} run`;
+  const install = packageManager === 'bun' ? 'bun install --frozen-lockfile'
+    : packageManager === 'pnpm' ? 'pnpm install --frozen-lockfile'
+      : packageManager === 'yarn' ? 'yarn install --frozen-lockfile'
+        : 'npm ci';
+  const commands = [install];
+  for (const name of ['check', 'lint', 'typecheck', 'test', 'build']) {
+    if (scripts[name]) commands.push(`${run} ${name}`);
+  }
+  if (commands.length === 1 && scripts.start) commands.push(`${run} start`);
+  return commands;
+}
+
+async function listRootTree(token, owner, repo, ref = 'main') {
+  const data = await githubRequest(token, `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}`);
+  return data.tree ?? [];
+}
+
 function textResult(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return { content: [{ type: 'text', text }] };
@@ -1143,6 +1171,161 @@ const tools = [
       const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/issues/${Number(args.number)}/comments`, {
         method: 'POST',
         body: JSON.stringify({ body: String(args.body) }),
+      });
+      return textResult({ id: data.id, html_url: data.html_url });
+    },
+  },
+  {
+    name: 'get_verification_plan',
+    description: 'Inspect repository metadata and suggest local verification commands without executing code.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        ref: { type: 'string', default: 'main' },
+      },
+      required: ['repo'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const ref = args.ref ?? 'main';
+      const tree = await listRootTree(ctx.githubToken, owner, repo, ref);
+      const packageFile = await getFileContentOrNull(ctx.githubToken, owner, repo, 'package.json', ref);
+      const pkg = packageFile ? JSON.parse(packageFile.content) : {};
+      const packageManager = packageManagerFromFiles(tree);
+      return textResult({
+        repo: `${owner}/${repo}`,
+        ref,
+        package_manager: packageManager,
+        engines: pkg.engines ?? {},
+        scripts: pkg.scripts ?? {},
+        recommended_commands: packageFile ? verificationCommands(packageManager, pkg.scripts ?? {}) : [],
+        notes: packageFile
+          ? 'Run these locally or in a self-hosted runner because this MCP server does not execute shell commands.'
+          : 'No package.json found at repository root.',
+      });
+    },
+  },
+  {
+    name: 'verify_mcp_deploy',
+    description: 'Verify a live MCP-over-HTTP endpoint: root, health, initialize, tools/list, and annotation sanity.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Base MCP endpoint URL, e.g. https://host/mcp.' },
+        bearer_token: { type: 'string', description: 'Optional token. If omitted, uses a dummy bearer for public passthrough auth checks.' },
+      },
+      required: ['url'],
+    },
+    handler: async (args) => {
+      const mcpUrl = new URL(String(args.url));
+      const rootUrl = new URL('/', mcpUrl);
+      const healthUrl = new URL('/health', mcpUrl);
+      const token = args.bearer_token ? String(args.bearer_token) : 'mcp-verification-dummy-token';
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+      const root = await fetch(rootUrl);
+      const health = await fetch(healthUrl);
+      const init = await fetch(mcpUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+      });
+      const list = await fetch(mcpUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+      });
+      const rootBody = await root.text();
+      const healthBody = await health.text();
+      const initBody = await init.json().catch(async () => ({ raw: await init.text() }));
+      const listBody = await list.json().catch(async () => ({ raw: await list.text() }));
+      const tools = listBody.result?.tools ?? [];
+      const readTools = tools.filter((tool) => tool.annotations?.readOnlyHint === true).map((tool) => tool.name);
+      const writeTools = tools.filter((tool) => tool.annotations?.readOnlyHint === false).map((tool) => tool.name);
+      return textResult({
+        url: String(mcpUrl),
+        root: { status: root.status, ok: root.ok, body_preview: rootBody.slice(0, 500) },
+        health: { status: health.status, ok: health.ok, body_preview: healthBody.slice(0, 500) },
+        initialize: { status: init.status, ok: init.ok, serverInfo: initBody.result?.serverInfo ?? null },
+        tools_list: { status: list.status, ok: list.ok, count: tools.length },
+        read_only_tools: readTools,
+        write_tools: writeTools,
+        annotations_ok: tools.length > 0 && readTools.length > 0,
+      });
+    },
+  },
+  {
+    name: 'compare_and_verify_pr',
+    description: 'Compare base/head refs and suggest verification commands for changed files without running code.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        base: { type: 'string', default: 'main' },
+        head: { type: 'string' },
+      },
+      required: ['repo', 'head'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const base = args.base ?? 'main';
+      const compare = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(args.head)}`);
+      const tree = await listRootTree(ctx.githubToken, owner, repo, args.head);
+      const packageFile = await getFileContentOrNull(ctx.githubToken, owner, repo, 'package.json', args.head);
+      const pkg = packageFile ? JSON.parse(packageFile.content) : {};
+      const packageManager = packageManagerFromFiles(tree);
+      const files = (compare.files ?? []).map((file) => file.filename);
+      const commands = packageFile ? verificationCommands(packageManager, pkg.scripts ?? {}) : [];
+      return textResult({
+        repo: `${owner}/${repo}`,
+        base,
+        head: args.head,
+        status: compare.status,
+        ahead_by: compare.ahead_by,
+        changed_files: files,
+        package_manager: packageManager,
+        recommended_commands: commands,
+        extra_checks: {
+          docs_only: files.length > 0 && files.every((file) => file.endsWith('.md') || file.startsWith('docs/')),
+          package_changed: files.some((file) => ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'yarn.lock'].includes(file)),
+          server_changed: files.some((file) => file.startsWith('src/') || file.startsWith('scripts/')),
+        },
+      });
+    },
+  },
+  {
+    name: 'create_verification_comment',
+    description: 'Post a pull request comment with manually supplied verification results.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        summary: { type: 'string' },
+        commands: { type: 'array', items: { type: 'string' } },
+        results: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['repo', 'number', 'summary'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const commands = Array.isArray(args.commands) ? args.commands : [];
+      const results = Array.isArray(args.results) ? args.results : [];
+      const body = [
+        '## Verification',
+        '',
+        String(args.summary),
+        '',
+        commands.length ? `Commands:\n${commands.map((cmd) => `- \`${cmd}\``).join('\n')}` : '',
+        results.length ? `Results:\n${results.map((item) => `- ${item}`).join('\n')}` : '',
+      ].filter(Boolean).join('\n\n');
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/issues/${Number(args.number)}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
       });
       return textResult({ id: data.id, html_url: data.html_url });
     },
