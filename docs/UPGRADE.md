@@ -48,6 +48,7 @@ Read-only:
 Write:
 
 - `update_file`
+- `create_repository`
 - `delete_file`
 - `merge_pull_request`
 - `commit_large_file_from_url`
@@ -137,6 +138,7 @@ PROTECTED_BRANCHES=main,master,production,staging,release
 BRANCH_PREFIXES=feat/,fix/,docs/,chore/,refactor/,test/,perf/
 ALLOW_PROTECTED_WRITES=false
 ALLOW_WORKFLOW_WRITES=false
+ALLOW_REPO_CREATE=false
 
 # Commit limits
 MAX_FILES_PER_COMMIT=5
@@ -160,6 +162,7 @@ PROTECTED_BRANCHES=main,master,production,staging,release
 BRANCH_PREFIXES=feat/,fix/,docs/,chore/,refactor/,test/,perf/
 ALLOW_PROTECTED_WRITES=false
 ALLOW_WORKFLOW_WRITES=false
+ALLOW_REPO_CREATE=false
 GITHUB_API_BASE=https://api.github.com
 ```
 

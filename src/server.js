@@ -55,6 +55,7 @@ const config = {
   allowProtectedWrites: envBool('ALLOW_PROTECTED_WRITES', false),
   allowBinary: envBool('ALLOW_BINARY', false),
   allowWorkflowWrites: envBool('ALLOW_WORKFLOW_WRITES', false),
+  allowRepoCreate: envBool('ALLOW_REPO_CREATE', false),
 };
 
 const sessions = new Map();
@@ -161,6 +162,16 @@ function validateRepo(repo) {
   }
   const [owner, name] = repo.split('/');
   return { owner, repo: name };
+}
+
+function validateRepoName(name) {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
+    throw new Error('Invalid repository name. Use 1-100 characters: letters, numbers, dot, underscore, or dash.');
+  }
+  if (name.startsWith('.') || name.endsWith('.')) {
+    throw new Error('Invalid repository name: cannot start or end with a dot.');
+  }
+  return name;
 }
 
 function validateBranch(branch, { requirePrefix = false, protect = true } = {}) {
@@ -764,6 +775,56 @@ const tools = [
         body: JSON.stringify({ title: String(args.title), body: String(args.body ?? ''), labels: Array.isArray(args.labels) ? args.labels : undefined }),
       });
       return textResult({ number: data.number, title: data.title, html_url: data.html_url });
+    },
+  },
+  {
+    name: 'create_repository',
+    description: 'Create a new GitHub repository for the authenticated user or an organization. Requires ALLOW_REPO_CREATE=true.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Repository name.' },
+        owner: { type: 'string', description: 'Optional org/user owner. Omit to create under authenticated user.' },
+        private: { type: 'boolean', default: true },
+        description: { type: 'string' },
+        auto_init: { type: 'boolean', default: false },
+        gitignore_template: { type: 'string', description: 'Optional GitHub gitignore template, e.g. Node.' },
+        license_template: { type: 'string', description: 'Optional license template, e.g. mit.' },
+      },
+      required: ['name'],
+    },
+    handler: async (args, ctx) => {
+      if (!config.allowRepoCreate) {
+        throw new Error('Repository creation is disabled. Set ALLOW_REPO_CREATE=true to enable create_repository.');
+      }
+      const name = validateRepoName(args.name);
+      const owner = args.owner ? String(args.owner) : '';
+      if (owner && !/^[A-Za-z0-9_.-]+$/.test(owner)) throw new Error('Invalid owner.');
+      const endpoint = owner ? `/orgs/${encodeURIComponent(owner)}/repos` : '/user/repos';
+      const fullName = owner ? `${owner}/${name}` : null;
+      if (fullName && config.allowedRepos.length > 0 && !config.allowedRepos.includes(fullName)) {
+        throw new Error(`Repository "${fullName}" is not allowed by ALLOWED_REPOS.`);
+      }
+      const data = await githubRequest(ctx.githubToken, endpoint, {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          private: args.private !== false,
+          description: args.description ? String(args.description) : undefined,
+          auto_init: Boolean(args.auto_init),
+          gitignore_template: args.gitignore_template ? String(args.gitignore_template) : undefined,
+          license_template: args.license_template ? String(args.license_template) : undefined,
+        }),
+      });
+      return textResult({
+        success: true,
+        full_name: data.full_name,
+        private: data.private,
+        default_branch: data.default_branch,
+        html_url: data.html_url,
+        clone_url: data.clone_url,
+      });
     },
   },
   {
