@@ -199,7 +199,7 @@ BRANCH_PREFIXES=feat/,fix/,docs/
 - Maximum 5 files per commit
 - Maximum 50 KB total payload
 - Maximum 30 KB per file
-- No binary content, secret-like tokens, or dangerous paths (`.env`, private keys, DB files, archives, images, PDFs, build output, CI workflow edits)
+- No secret-like tokens or dangerous paths (`.env`, private keys, DB files, archives, PDFs, build output, CI workflow edits). Common image assets are allowed by default; other binary files remain opt-in.
 
 ---
 
