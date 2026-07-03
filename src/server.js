@@ -54,6 +54,7 @@ const config = {
   requestBodyLimit: envInt('REQUEST_BODY_LIMIT', 1_000_000),
   allowProtectedWrites: envBool('ALLOW_PROTECTED_WRITES', false),
   allowBinary: envBool('ALLOW_BINARY', false),
+  allowImages: envBool('ALLOW_IMAGES', true),
   allowWorkflowWrites: envBool('ALLOW_WORKFLOW_WRITES', false),
   allowRepoCreate: envBool('ALLOW_REPO_CREATE', false),
 };
@@ -189,7 +190,14 @@ function validateBranch(branch, { requirePrefix = false, protect = true } = {}) 
   }
 }
 
-function validatePath(filePath, { allowBinary = false } = {}) {
+const IMAGE_SUFFIXES = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+
+function isImagePath(filePath) {
+  const lower = filePath.toLowerCase();
+  return IMAGE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+function validatePath(filePath, { allowBinary = false, allowImages = config.allowImages } = {}) {
   if (typeof filePath !== 'string' || !filePath.trim()) {
     throw new Error('File path is required.');
   }
@@ -203,8 +211,9 @@ function validatePath(filePath, { allowBinary = false } = {}) {
   ]);
   const deniedPrefixes = ['node_modules/', 'dist/', 'build/', '.next/', '.ssh/', 'terraform/', 'k8s/', 'kubernetes/'];
   if (!config.allowWorkflowWrites) deniedPrefixes.unshift('.github/workflows/');
-  const deniedSuffixes = ['.pem', '.key', '.p12', '.pfx', '.db', '.sqlite', '.zip', '.rar', '.7z', '.tar', '.tar.gz', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'];
-  const deniedBySuffix = !allowBinary && deniedSuffixes.some((suffix) => normalized.toLowerCase().endsWith(suffix));
+  const deniedSuffixes = ['.pem', '.key', '.p12', '.pfx', '.db', '.sqlite', '.zip', '.rar', '.7z', '.tar', '.tar.gz', '.pdf'];
+  const deniedImage = !allowBinary && !allowImages && isImagePath(normalized);
+  const deniedBySuffix = !allowBinary && (deniedImage || deniedSuffixes.some((suffix) => normalized.toLowerCase().endsWith(suffix)));
   if (deniedExact.has(normalized) || deniedPrefixes.some((prefix) => normalized.startsWith(prefix)) || deniedBySuffix) {
     throw new Error(`Path "${filePath}" is denied by safety policy.`);
   }
@@ -1163,13 +1172,14 @@ const tools = [
       try {
         const treeEntries = [];
         for (const item of items) {
-          const path = validatePath(item?.path, { allowBinary: config.allowBinary });
+          const path = validatePath(item?.path, { allowBinary: config.allowBinary, allowImages: config.allowImages });
           const downloaded = await downloadSourceToTemp(item?.source_url, path);
           downloads.push(downloaded);
           totalBytes += downloaded.bytes;
           if (limitEnabled(config.maxBytesPerCommit) && totalBytes > config.maxBytesPerCommit) throw new Error(`Commit payload is too large. Max ${config.maxBytesPerCommit} bytes.`);
           const isBinary = sampleLooksBinary(downloaded.sample, downloaded.contentType);
-          if (isBinary && !config.allowBinary) throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true.`);
+          const imageAllowed = config.allowImages && isImagePath(path);
+          if (isBinary && !config.allowBinary && !imageAllowed) throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true to enable non-image binary commits.`);
           if (!isBinary) await scanTextFileForSecrets(downloaded.tempPath, path);
           const blob = await createBlobFromFile(ctx.githubToken, owner, repo, downloaded.tempPath);
           treeEntries.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
@@ -1393,7 +1403,7 @@ const tools = [
   },
   {
     name: 'commit_large_file_from_url',
-    description: 'Download one large file from source_url server-side, create a Git blob, and commit it to an existing branch. Binary files require ALLOW_BINARY=true.',
+    description: 'Download one large file from source_url server-side, create a Git blob, and commit it to an existing branch. Images are allowed by ALLOW_IMAGES=true; other binary files require ALLOW_BINARY=true.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: 'object',
@@ -1409,13 +1419,14 @@ const tools = [
     handler: async (args, ctx) => {
       const { owner, repo } = validateRepo(args.repo);
       validateBranch(args.branch, { protect: true });
-      const path = validatePath(args.path, { allowBinary: config.allowBinary });
+      const path = validatePath(args.path, { allowBinary: config.allowBinary, allowImages: config.allowImages });
       let downloaded;
       try {
         downloaded = await downloadSourceToTemp(args.source_url, path);
         const isBinary = sampleLooksBinary(downloaded.sample, downloaded.contentType);
-        if (isBinary && !config.allowBinary) {
-          throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true to enable binary large-file commits.`);
+        const imageAllowed = config.allowImages && isImagePath(path);
+        if (isBinary && !config.allowBinary && !imageAllowed) {
+          throw new Error(`File "${path}" looks binary. Set ALLOW_BINARY=true to enable non-image binary large-file commits.`);
         }
         if (!isBinary) await scanTextFileForSecrets(downloaded.tempPath, path);
         const blob = await createBlobFromFile(ctx.githubToken, owner, repo, downloaded.tempPath);

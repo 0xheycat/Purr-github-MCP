@@ -108,7 +108,7 @@ Call `commit_large_file_from_url`:
 Rules:
 
 - `source_url` must be `http` or `https` and reachable by the deployed server.
-- Binary-looking files require `ALLOW_BINARY=true`.
+- Common image assets (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are allowed when `ALLOW_IMAGES=true` (default). Other binary-looking files require `ALLOW_BINARY=true`.
 - Text files are still secret-scanned before GitHub upload.
 - The server stores the download in a temporary file and removes it after the
   commit attempt.
@@ -146,6 +146,7 @@ MAX_BYTES_PER_COMMIT=0
 MAX_BYTES_PER_FILE=100000000
 
 # Binary large files
+ALLOW_IMAGES=true
 ALLOW_BINARY=true
 ```
 
