@@ -28,7 +28,7 @@ const config = {
   githubApiBase: env('GITHUB_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
   allowedRepos: splitList(env('ALLOWED_REPOS')),
   protectedBranches: new Set(splitList(env('PROTECTED_BRANCHES', 'main,master,production,staging,release'))),
-  maxBytesPerFile: envInt('MAX_BYTES_PER_FILE', 30000),
+  maxBytesPerFile: envInt('MAX_BYTES_PER_FILE', 100_000_000),
   allowProtectedWrites: env('ALLOW_PROTECTED_WRITES', 'false').toLowerCase() === 'true',
   allowWorkflowWrites: env('ALLOW_WORKFLOW_WRITES', 'false').toLowerCase() === 'true',
 };

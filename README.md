@@ -217,7 +217,7 @@ BRANCH_PREFIXES=feat/,fix/,docs/
 | `BRANCH_PREFIXES` | `feat/,fix/,docs/,chore/,refactor/,test/,perf/` | Required prefixes for new branches. |
 | `MAX_FILES_PER_COMMIT` | `5` | Per-commit file limit. |
 | `MAX_BYTES_PER_COMMIT` | `50000` | Total payload limit. |
-| `MAX_BYTES_PER_FILE` | `30000` | Per-file payload limit. |
+| `MAX_BYTES_PER_FILE` | `100000000` | Per-file payload limit. |
 | `CORS_ORIGIN` | `*` | CORS origin. Tighten in production. |
 
 ---
