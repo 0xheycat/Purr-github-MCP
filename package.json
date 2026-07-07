@@ -1,22 +1,26 @@
 {
   "name": "purr-github-mcp",
   "version": "1.0.0",
-  "description": "Bearer-auth GitHub MCP server for Notion, agents, and cloud deployment.",
+  "description": "OAuth-discoverable Bearer-auth GitHub MCP server for ChatGPT, Notion, agents, and cloud deployment.",
   "type": "module",
   "private": false,
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "NODE_ENV=development node --watch src/server.js",
-    "check": "node --check src/server.js && node scripts/smoke-test.mjs",
+    "start": "node src/oauth-wrapper.js",
+    "start:bare": "node src/server.js",
+    "dev": "NODE_ENV=development node --watch src/oauth-wrapper.js",
+    "dev:bare": "NODE_ENV=development node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/oauth-wrapper.js && node scripts/smoke-test.mjs",
     "smoke": "node scripts/smoke-test.mjs"
   },
   "keywords": [
     "mcp",
     "github",
     "notion",
+    "chatgpt",
+    "oauth",
     "bearer-token",
     "manufact",
     "agent-tools",
