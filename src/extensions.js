@@ -123,7 +123,39 @@ function textResult(value) {
 const enc = (s) => encodeURIComponent(s);
 const encPath = (p) => encodeURIComponent(p).replace(/%2F/g, '/');
 
+const GITHUB_OPERATING_GUIDE = {
+  name: 'Purr GitHub MCP Operating Guide',
+  version: '2026-07-08',
+  serverRole: 'Use this MCP for GitHub repository, branch, issue, pull request, and file operations only. Do not run install/build/test commands here; use Purr Verify MCP for runtime verification.',
+  startupProtocol: [
+    'Call read_operating_guide before repo work.',
+    'Confirm target repo, branch, and goal.',
+    'Read relevant files before modifying anything.',
+    'Summarize the intended patch before write operations.',
+    'Use Verify MCP async jobs for build/lint/typecheck/test validation.',
+  ],
+  hardRules: [
+    'Do not write directly to protected branches unless explicitly configured.',
+    'Do not edit .env files, dependency folders, build output, or workflow files unless explicitly enabled by env.',
+    'Do not run verification commands in this MCP.',
+    'Do not retry failed write tools in a loop; stop and report the exact tool and error.',
+    'Keep diffs and logs summarized unless the user asks for full output.',
+  ],
+  safeToolRouting: {
+    github: ['get_repository', 'list_tree', 'get_files_batch', 'compare_refs', 'create_branch', 'commit_files', 'create_pull_request'],
+    verify: ['health_check', 'list_allowed_commands', 'create_verification_job', 'get_verification_job'],
+    notion: ['specs', 'plans', 'audit notes', 'project context'],
+  },
+};
+
 export const extraTools = [
+  {
+    name: 'read_operating_guide',
+    description: 'Read the Purr GitHub MCP operating guide. Call this before repository work so the agent follows the correct GitHub/Verify/Notion tool routing and safety rules.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => textResult(GITHUB_OPERATING_GUIDE),
+  },
   {
     name: 'list_commits',
     description: 'List commits on a branch or ref, optionally filtered by file path.',
