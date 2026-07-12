@@ -12,7 +12,7 @@
     "start:bare": "node src/server.js",
     "dev": "NODE_ENV=development node --watch --import ./src/deployment-preload.js --import ./src/debug-preload.js src/oauth-wrapper.js",
     "dev:bare": "NODE_ENV=development node --watch src/server.js",
-    "check": "node --check src/server.js && node --check src/oauth-wrapper.js && node --check src/debug-preload.js && node --check src/deployment-mode.js && node --check src/deployment-preload.js && node --check src/user-session.js && node scripts/oauth-redirect-test.mjs && node scripts/deployment-mode-test.mjs && node scripts/user-session-test.mjs && node scripts/smoke-test.mjs",
+    "check": "node --check src/server.js && node --check src/oauth-wrapper.js && node --check src/debug-preload.js && node --check src/deployment-mode.js && node --check src/deployment-preload.js && node --check src/user-session.js && node --check src/oauth-identity.js && node scripts/oauth-redirect-test.mjs && node scripts/deployment-mode-test.mjs && node scripts/user-session-test.mjs && node scripts/oauth-identity-test.mjs && node scripts/smoke-test.mjs",
     "smoke": "node scripts/smoke-test.mjs"
   },
   "keywords": [
