@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readUserSession } from './user-session.js';
 
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
