@@ -234,9 +234,7 @@ function isRedirectAllowed(clientId, redirectUri) {
   const registered = registeredClients.get(clientId);
   if (registered?.redirect_uris?.includes(redirectUri)) return true;
   if (clientId === config.defaultClientId) {
-    const allowed = allowedRedirectUris();
-    if (allowed.length > 0) return allowed.includes(redirectUri);
-    return redirectUri.startsWith('https://chatgpt.com/connector/oauth/');
+    return allowedRedirectUris().includes(redirectUri);
   }
   return false;
 }
