@@ -20,7 +20,7 @@ Goal: replace the current single-owner credential bridge with a real public iden
 
 Ordered atomic items:
 
-1. Enforce exact OAuth redirect URI matching. Remove the implicit `https://chatgpt.com/connector/oauth/` prefix fallback and require an exact URI registered for the client.
+1. ✅ Enforce exact OAuth redirect URI matching. The implicit `https://chatgpt.com/connector/oauth/` prefix fallback is removed and exact configured or dynamically registered URIs have regression coverage.
 2. Add a hosted versus self-hosted deployment-mode boundary. Hosted mode must fail closed when public-auth configuration is incomplete; self-hosted token mode must remain explicit and documented.
 3. Replace owner-code authorization and global `OAUTH_SUBJECT` with authenticated GitHub user sessions.
 4. Add GitHub App sign-in and installation selection.
@@ -115,4 +115,4 @@ Transient failures receive at most four bounded retries in the same run. The sam
 
 ## Current next item
 
-**G1.1 — Enforce exact OAuth redirect URI registration and add regression coverage.**
+**G1.2 — Add an explicit hosted versus self-hosted deployment-mode boundary, with hosted mode failing closed when public-auth configuration is incomplete.**
