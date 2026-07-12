@@ -107,6 +107,10 @@ function allowedRedirectUris() {
 }
 
 function ownerCode() {
+function isHostedMode() {
+  return env('DEPLOYMENT_MODE') === 'hosted';
+}
+
   return env('OAUTH_OWNER_CODE') || env('OAUTH_ADMIN_CODE');
 }
 
