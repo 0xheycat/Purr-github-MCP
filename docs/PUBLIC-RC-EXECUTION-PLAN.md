@@ -22,7 +22,7 @@ Ordered atomic items:
 
 1. ✅ Enforce exact OAuth redirect URI matching. The implicit `https://chatgpt.com/connector/oauth/` prefix fallback is removed and exact configured or dynamically registered URIs have regression coverage.
 2. ✅ Add a hosted versus self-hosted deployment-mode boundary. Startup now fails closed unless `DEPLOYMENT_MODE` is explicitly `hosted` or `self-hosted`; hosted mode requires complete HTTPS OAuth configuration and distinct signing/upstream credential material, while explicit self-hosted mode preserves legacy token compatibility. Regression coverage runs in `npm run check`.
-3. ⏳ Replace owner-code authorization and global `OAUTH_SUBJECT` with authenticated GitHub user sessions. A signed, expiring, HttpOnly/Secure/SameSite session primitive keyed to immutable GitHub user ID plus login now exists with regression coverage; authorization-flow wiring and owner-code removal remain pending.
+3. ✅ Replace owner-code authorization and global `OAUTH_SUBJECT` with authenticated GitHub user sessions. Hosted `/authorize` now requires the signed GitHub session, stores immutable GitHub identity on authorization codes, derives access-token identity from that code, and omits the owner-code field/check while explicit self-hosted compatibility remains intact. Regression coverage runs in `npm run check`.
 4. Add GitHub App sign-in and installation selection.
 5. Persist users, sessions, OAuth clients, authorization codes, refresh-token families, installations, and selected repositories.
 6. Mint GitHub installation tokens just in time and never expose them to MCP clients or logs.
@@ -115,4 +115,4 @@ Transient failures receive at most four bounded retries in the same run. The sam
 
 ## Current next item
 
-**G1.3 continuation — Wire the verified GitHub user session primitive into `/authorize`, derive OAuth token subject from the authenticated session, and remove the hosted owner-code form/check without yet implementing GitHub App installation selection.**
+**G1.4 — Add GitHub App sign-in and installation selection, beginning with the bounded login/callback route and signed user-session creation.**
