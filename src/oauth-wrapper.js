@@ -320,8 +320,13 @@ async function readRequestBody(req, maxBytes = 64 * 1024) {
 }
 
 async function handleAuthorize(req, res, url) {
-  if (!ownerCode()) {
+  if (!isHostedMode() && !ownerCode()) {
     sendHtml(res, 500, '<h1>OAuth setup required</h1><p>Set OAUTH_OWNER_CODE before using /authorize.</p>');
+    return;
+  }
+  const session = isHostedMode() ? readUserSession(req) : null;
+  if (isHostedMode() && !session.ok) {
+    sendHtml(res, 401, '<h1>GitHub sign-in required</h1><p>Sign in with GitHub before authorizing this MCP connection.</p>');
     return;
   }
   if (req.method === 'GET') {
