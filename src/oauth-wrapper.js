@@ -404,9 +404,12 @@ async function handleToken(req, res) {
     return;
   }
   const now = Math.floor(Date.now() / 1000);
+  const identityClaims = isHostedMode()
+    ? accessTokenIdentityClaims(entry)
+    : { sub: env('OAUTH_SUBJECT', '0xheycat') };
   const accessToken = signJwt({
     iss: authIssuer(req),
-    sub: env('OAUTH_SUBJECT', '0xheycat'),
+    ...identityClaims,
     aud: entry.resource,
     client_id: entry.client_id,
     scope: entry.scope,
