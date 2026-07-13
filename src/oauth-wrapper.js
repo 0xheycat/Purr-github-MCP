@@ -299,8 +299,8 @@ function renderAuthorizePage(params, req, error = '') {
     ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
     <form method="post" action="/authorize">
       ${hidden}
-      <label>Owner approval code</label>
-      <input type="password" name="owner_code" autocomplete="current-password" required autofocus>
+      ${isHostedMode() ? '' : `<label>Owner approval code</label>
+      <input type="password" name="owner_code" autocomplete="current-password" required autofocus>`}
       <button type="submit">Authorize ChatGPT</button>
     </form>
   </main>
