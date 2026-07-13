@@ -349,7 +349,7 @@ async function handleAuthorize(req, res, url) {
     sendHtml(res, 400, renderAuthorizePage(params, req, error));
     return;
   }
-  if (!timingEqualString(params.get('owner_code') || '', ownerCode())) {
+  if (!isHostedMode() && !timingEqualString(params.get('owner_code') || '', ownerCode())) {
     sendHtml(res, 401, renderAuthorizePage(params, req, 'Invalid owner approval code.'));
     return;
   }
@@ -360,6 +360,7 @@ async function handleAuthorize(req, res, url) {
     scope: params.get('scope') || supportedScopes().join(' '),
     resource: params.get('resource') || resourceUrl(req),
     code_challenge: params.get('code_challenge'),
+    ...(isHostedMode() ? authorizationCodeIdentityFields(session) : {}),
     created_at: Date.now(),
     expires_at: Date.now() + 5 * 60 * 1000,
   });
