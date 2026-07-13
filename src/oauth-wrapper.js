@@ -106,11 +106,11 @@ function allowedRedirectUris() {
   return splitList(env('OAUTH_ALLOWED_REDIRECT_URIS') || env('ALLOWED_REDIRECT_URIS'));
 }
 
-function ownerCode() {
 function isHostedMode() {
   return env('DEPLOYMENT_MODE') === 'hosted';
 }
 
+function ownerCode() {
   return env('OAUTH_OWNER_CODE') || env('OAUTH_ADMIN_CODE');
 }
 
