@@ -31,7 +31,10 @@ Before repository work:
 - Do not create repositories unless `ALLOW_REPO_CREATE=true` is configured.
 - Do not edit GitHub Actions workflows unless `ALLOW_WORKFLOW_WRITES=true` is configured.
 - Do not run verification commands through this server.
-- Do not retry failed write tools in a loop. Stop and report the exact tool, input summary, and error.
+- Retry transient read-only MCP transport errors, timeouts, HTTP 429, and HTTP 5xx at most five times in the current run with backoff of 2, 4, 8, 16, and 32 seconds. Use the official GitHub MCP as a read-only fallback when available.
+- Do not blindly retry a failed write. Refetch the branch HEAD and affected blob SHA values, reconcile the patch against fresh state, then retry the write once.
+- If the reconciled write still fails, record the exact tool, input summary, error, expected HEAD, and whether the write may have partially landed. End only the current bounded run gracefully.
+- Never disable, pause, or terminate a recurring schedule because a write failed. The next scheduled run must resume from fresh repository state.
 - Keep logs and diffs summarized unless the user asks for full details.
 
 ## Preferred workflow
