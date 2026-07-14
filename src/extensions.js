@@ -125,7 +125,7 @@ const encPath = (p) => encodeURIComponent(p).replace(/%2F/g, '/');
 
 const GITHUB_OPERATING_GUIDE = {
   name: 'Purr GitHub MCP Operating Guide',
-  version: '2026-07-08',
+  version: '2026-07-14',
   serverRole: 'Use this MCP for GitHub repository, branch, issue, pull request, and file operations only. Do not run install/build/test commands here; use Purr Verify MCP for runtime verification.',
   startupProtocol: [
     'Call read_operating_guide before repo work.',
@@ -138,7 +138,10 @@ const GITHUB_OPERATING_GUIDE = {
     'Do not write directly to protected branches unless explicitly configured.',
     'Do not edit .env files, dependency folders, build output, or workflow files unless explicitly enabled by env.',
     'Do not run verification commands in this MCP.',
-    'Do not retry failed write tools in a loop; stop and report the exact tool and error.',
+    'Retry transient read-only MCP transport errors, timeouts, HTTP 429, and HTTP 5xx at most five times with backoff of 2, 4, 8, 16, and 32 seconds; use the official GitHub MCP as a read-only fallback when available.',
+    'Do not blindly retry a failed write. Refetch branch HEAD and affected blob SHAs, reconcile the patch, then retry once.',
+    'If the reconciled write still fails, record the tool, error, expected HEAD, and possible partial effects; end only the current bounded run gracefully.',
+    'Never disable, pause, or terminate a recurring schedule because a write failed. Resume from fresh repository state on the next scheduled run.',
     'Keep diffs and logs summarized unless the user asks for full output.',
   ],
   safeToolRouting: {
