@@ -155,6 +155,15 @@ export class DurableOAuthStore {
     return value === undefined ? undefined : structuredClone(value);
   }
 
+  async listRecords(kind) {
+    const state = await this.#readStateUnlocked();
+    const prefix = `${kind}:`;
+    return Object.entries(state.records)
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, record]) => structuredClone(record))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
   async compareAndSetRecord(input) {
     return this.#withExclusiveLock(async () => {
       const state = await this.#readStateUnlocked();
