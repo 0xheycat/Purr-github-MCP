@@ -21,16 +21,20 @@ import {
 export class ScopedMcpProxy {
   #config;
   #serverToken;
+  #ownerGitHubToken;
   #jwtSecret;
   #serviceForRequest;
+  #githubAuth;
   #catalogClient;
   #catalogCache = { expiresAt: 0, tools: [] };
 
   constructor(options) {
     this.#config = options.config;
     this.#serverToken = options.serverToken;
+    this.#ownerGitHubToken = options.ownerGitHubToken;
     this.#jwtSecret = options.jwtSecret;
     this.#serviceForRequest = options.serviceForRequest;
+    this.#githubAuth = options.githubAuth;
     this.#catalogClient = new SafeJsonHttpClient({ timeoutMs: 5_000, maxResponseBytes: 5_000_000 });
   }
 
@@ -65,24 +69,63 @@ export class ScopedMcpProxy {
     }
   }
 
+  #ownerAuthorization() {
+    if (!this.#ownerGitHubToken) throw new Error('owner GitHub credential is not configured');
+    return `Bearer ${this.#ownerGitHubToken}`;
+  }
+
   async #caller(req) {
     const token = parseBearer(req);
     if (!token) return null;
     if (this.#serverToken && secureEqual(token, this.#serverToken)) {
-      return { kind: 'legacy', scopes: ['github.admin'], authorization: `Bearer ${this.#serverToken}` };
+      try {
+        return {
+          kind: 'legacy',
+          scopes: ['github.admin'],
+          authorization: this.#ownerAuthorization(),
+        };
+      } catch {
+        return null;
+      }
     }
     const service = this.#serviceForRequest(req);
     if (service && token.startsWith('pgh_at_')) {
       try {
         const grant = await service.authenticate(req.headers.authorization);
-        return { kind: 'oauth', scopes: grant.scopes, authorization: `Bearer ${this.#serverToken}` };
+        if (grant.githubCredentialRef) {
+          if (!this.#githubAuth) return null;
+          const credential = await this.#githubAuth.resolveToken(grant.githubCredentialRef);
+          return {
+            kind: 'oauth',
+            scopes: grant.scopes,
+            subject: grant.subject,
+            githubUserId: grant.githubUserId,
+            githubCredentialRef: grant.githubCredentialRef,
+            authorization: `Bearer ${credential.token}`,
+          };
+        }
+        return {
+          kind: 'oauth',
+          scopes: grant.scopes,
+          subject: grant.subject,
+          authorization: this.#ownerAuthorization(),
+        };
       } catch {
         return null;
       }
     }
     const legacy = this.#legacyJwt(token, req);
-    if (legacy && this.#serverToken) {
-      return { kind: 'oauth', scopes: legacy.scopes, authorization: `Bearer ${this.#serverToken}` };
+    if (legacy) {
+      try {
+        return {
+          kind: 'oauth',
+          scopes: legacy.scopes,
+          subject: legacy.subject,
+          authorization: this.#ownerAuthorization(),
+        };
+      } catch {
+        return null;
+      }
     }
     if (this.#config.authMode === 'passthrough') {
       return { kind: 'passthrough', scopes: ['github.admin'], authorization: req.headers.authorization };
@@ -91,7 +134,7 @@ export class ScopedMcpProxy {
   }
 
   async #catalog(force = false) {
-    if (!this.#serverToken) throw new Error('OAuth catalog requires SERVER_TOKEN');
+    if (!this.#ownerGitHubToken) throw new Error('OAuth catalog requires the owner GitHub credential');
     if (!force && this.#catalogCache.expiresAt > Date.now()) return this.#catalogCache.tools;
     const endpoint = `http://${this.#config.upstreamHost}:${this.#config.upstreamPort}/mcp`;
     let lastError;
@@ -103,7 +146,7 @@ export class ScopedMcpProxy {
           init: {
             method: 'POST',
             headers: {
-              Authorization: `Bearer ${this.#serverToken}`,
+              Authorization: this.#ownerAuthorization(),
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ jsonrpc: '2.0', id: 'oauth-catalog', method: 'tools/list', params: {} }),
