@@ -1,43 +1,68 @@
-# ChatGPT OAuth for Purr GitHub MCP
+# ChatGPT + GitHub user OAuth
 
-This OAuth layer sits in front of the existing Purr GitHub MCP server. It does not replace the current GitHub tools, catalog, safety checks, transport, or execution logic.
+Purr GitHub MCP keeps the existing GitHub tool server unchanged and places an OAuth and credential-routing layer in front of it.
 
-The existing `SERVER_TOKEN` and passthrough authentication paths remain supported. A direct valid `SERVER_TOKEN` keeps full legacy access, so installed non-OAuth clients are not forced through the new scope model.
+The public flow is:
 
-## What the OAuth layer adds
+```text
+ChatGPT
+  -> Purr OAuth 2.1 + PKCE
+  -> GitHub App browser authorization
+  -> encrypted GitHub user credential
+  -> existing Purr GitHub MCP tools
+  -> GitHub API as the authorized user
+```
 
-- OAuth 2.1 authorization code flow with mandatory PKCE S256
-- persistent dynamic client registration
-- opaque access and refresh tokens
-- one-time authorization codes stored only by SHA-256 digest
-- atomic authorization-code consumption and refresh-token rotation
-- durable JSON storage with an exclusive lock, compare-and-set revisions, fsync, and atomic rename
-- AES-256-GCM encrypted grant records
-- signed, HTTP-only consent cookies
-- bounded outbound catalog reads with timeout and redirect rejection
-- scope-filtered `tools/list` and scope enforcement before `tools/call`
-- compatibility validation for short-lived JWTs issued by the previous OAuth wrapper
+`src/server.js`, its tool registry, handlers, safety guards, protected-branch policy, secret scanning, payload limits, and repository controls are not replaced.
 
-## Scope hierarchy
+## Compatibility model
 
-The scopes are hierarchical:
+Two credential routes remain available:
+
+```text
+ChatGPT OAuth user
+  -> GitHub credential reference
+  -> encrypted user-to-server token
+  -> existing tools
+
+Valid legacy SERVER_TOKEN
+  -> existing owner GITHUB_TOKEN
+  -> existing tools
+```
+
+The internal MCP child process binds only to loopback and runs in passthrough mode. `SERVER_TOKEN` and `GITHUB_TOKEN` are removed from its environment. The public wrapper is therefore the only component allowed to select and inject a GitHub credential.
+
+The tool catalog remains complete when the client requests `github.admin`. Current smoke coverage requires all 35 tools to remain present.
+
+## Maintained upstream components
+
+The implementation follows the browser OAuth and callback patterns from the official `github/github-mcp-server` project.
+
+Node integration uses maintained Octokit packages:
+
+```text
+@octokit/oauth-app
+@octokit/webhooks
+```
+
+Octokit handles GitHub authorization URLs, code exchange, user authentication, token refresh, token revocation, and signed webhook verification. Purr-specific code is limited to binding the GitHub identity to the ChatGPT OAuth transaction, encrypted persistence, credential selection, and compatibility routing.
+
+## MCP scopes
+
+Purr scopes are hierarchical:
 
 ```text
 github.read -> github.plan -> github.write -> github.admin
 ```
 
-A higher scope includes every lower scope.
-
-| Scope | Typical access |
+| Scope | Access |
 |---|---|
 | `github.read` | repository, branch, issue, PR, commit, tree, and file reads |
 | `github.plan` | read access plus verification planning tools |
-| `github.write` | branch, commit, issue, PR, comment, and other normal write tools |
+| `github.write` | branch, commit, issue, PR, comment, and normal write tools |
 | `github.admin` | all tools, including repository creation, merge, and delete operations |
 
-Tool scope is derived from its existing annotations. Read-only tools default to `github.read`; other tools default to `github.write`. Only the small plan/admin override sets need special classification. New normally annotated tools do not require changes to the OAuth service.
-
-For compatibility with the previous ChatGPT configuration:
+Legacy aliases remain accepted:
 
 ```text
 read:user -> github.read
@@ -45,25 +70,20 @@ user:email -> github.read
 repo -> github.admin
 ```
 
-The broad legacy `repo` request remains full-access so an already configured ChatGPT client does not silently lose tools after deployment. New clients should request the canonical `github.*` scopes.
+GitHub permissions and Purr scopes are separate gates. A tool call succeeds only when both permit it, together with the existing Purr safety policy.
 
-## Endpoints
+## Public endpoints
 
-Protected-resource discovery:
+Discovery:
 
 ```text
 GET /.well-known/oauth-protected-resource
 GET /.well-known/oauth-protected-resource/mcp
-```
-
-Authorization-server discovery:
-
-```text
 GET /.well-known/oauth-authorization-server
 GET /.well-known/openid-configuration
 ```
 
-OAuth endpoints:
+ChatGPT OAuth:
 
 ```text
 GET  /oauth/authorize
@@ -73,94 +93,109 @@ POST /oauth/register
 POST /oauth/revoke
 ```
 
-Legacy aliases remain available:
+GitHub App integration:
 
 ```text
-/authorize
-/token
-/register
-/revoke
+GET  /oauth/github/callback
+POST /oauth/github/webhooks
 ```
+
+The owner-code consent form remains only as a compatibility fallback when GitHub App OAuth is not configured. When all GitHub App variables are present, `/oauth/authorize` redirects directly to GitHub.
+
+## GitHub App setup
+
+Create a GitHub App owned by the intended organization or account.
+
+Configure:
+
+```text
+Callback URL: https://<public-host>/oauth/github/callback
+Webhook URL:  https://<public-host>/oauth/github/webhooks
+Webhook secret: required
+Expiring user authorization tokens: enabled
+```
+
+Subscribe to these lifecycle events:
+
+```text
+github_app_authorization
+installation
+installation_repositories
+```
+
+The exact GitHub App permission matrix for all current tools is documented in `docs/github-app-permissions.md`.
 
 ## Required production environment
 
-The existing MCP server-token setup remains required for OAuth proxying:
+Existing compatibility credentials:
 
 ```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=<existing-private-server-token>
-GITHUB_TOKEN=<existing-private-github-token>
+SERVER_TOKEN=<existing-private-mcp-token>
+GITHUB_TOKEN=<existing-owner-github-token>
 ```
 
-OAuth configuration:
+Public OAuth configuration:
 
 ```bash
-PUBLIC_BASE_URL=https://mcp.pursr.xyz
-OAUTH_RESOURCE_URL=https://mcp.pursr.xyz/mcp
-OAUTH_ISSUER=https://auth-git.pursr.xyz
-OAUTH_AUTHORIZATION_SERVERS=https://auth-git.pursr.xyz
+PUBLIC_BASE_URL=https://<public-host>
+OAUTH_RESOURCE_URL=https://<public-host>/mcp
+OAUTH_ISSUER=https://<authorization-host>
+OAUTH_AUTHORIZATION_SERVERS=https://<authorization-host>
 
 OAUTH_CLIENT_ID=chatgpt-purr-git
-OAUTH_ALLOWED_REDIRECT_URIS=<exact-callback-url-shown-by-chatgpt>
-OAUTH_OWNER_CODE=<private-browser-approval-code>
-OAUTH_SUBJECT=0xheycat
-
+OAUTH_ALLOWED_REDIRECT_URIS=<exact-chatgpt-callback>
 OAUTH_TOKEN_TTL_SECONDS=3600
 OAUTH_REFRESH_TOKEN_TTL_SECONDS=2592000
 OAUTH_STORE_PATH=/var/lib/purr-github-mcp/oauth-store.json
 ```
 
-`OAUTH_STORE_PATH` must point to a persistent volume in production. Its parent directory is created automatically. The store file is created with mode `0600`.
-
-Encryption and cookie keys may be supplied explicitly as base64-encoded 32-byte values:
+GitHub App configuration:
 
 ```bash
-OAUTH_ENCRYPTION_KEY=<base64-32-byte-key>
-OAUTH_COOKIE_KEY=<base64-32-byte-key>
+GITHUB_APP_CLIENT_ID=<github-app-client-id>
+GITHUB_APP_CLIENT_SECRET=<github-app-client-secret>
+GITHUB_APP_CALLBACK_URL=https://<public-host>/oauth/github/callback
+GITHUB_APP_WEBHOOK_SECRET=<github-app-webhook-secret>
 ```
 
-When omitted, separate keys are derived from `OAUTH_SECRET_SOURCE`, then `OAUTH_JWT_SECRET`, then the existing `SERVER_TOKEN`. Explicit independent keys are recommended for production key management.
+All three OAuth App values and the webhook secret are required together. Partial GitHub App configuration fails at startup instead of falling back silently.
 
-## ChatGPT setup
+Recommended independent encryption keys:
 
-Use:
-
-```text
-Name: MCP github
-Server URL: https://mcp.pursr.xyz/mcp
-Authentication: OAuth
+```bash
+OAUTH_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+OAUTH_COOKIE_KEY=<base64-encoded-32-byte-key>
+OAUTH_SECRET_SOURCE=<independent-secret-source>
 ```
 
-Recommended OAuth settings:
+`OAUTH_STORE_PATH` must be on a persistent volume. The store uses an exclusive lock, revision compare-and-set, fsync, atomic rename, and file mode `0600`.
 
-```text
-Registration method: Dynamic Client Registration
-Token endpoint auth method: none
-Scopes: github.admin
-```
+## Runtime behavior
 
-A narrower client can request `github.read`, `github.plan`, or `github.write` instead.
+1. ChatGPT discovers Purr's OAuth server and starts authorization with PKCE S256.
+2. Purr persists the outer OAuth transaction and binds it to a signed HTTP-only cookie.
+3. Purr creates a one-time GitHub state record and redirects the browser to GitHub.
+4. Octokit exchanges the GitHub callback code and reads the authenticated GitHub identity.
+5. The raw GitHub access and refresh tokens are encrypted with AES-256-GCM.
+6. The ChatGPT authorization code is bound to a credential reference, not to a raw GitHub token.
+7. ChatGPT receives opaque Purr access and refresh tokens.
+8. For every OAuth `tools/call`, the wrapper resolves the bound GitHub credential and injects it into the unchanged internal MCP server.
+9. Legacy `SERVER_TOKEN` requests continue to use the owner GitHub credential.
+10. Expiring GitHub tokens are refreshed through a durable single-flight lease so concurrent requests do not rotate the same refresh token twice.
+11. A signed `github_app_authorization.revoked` webhook marks every credential for that GitHub user revoked.
+12. Installation lifecycle events are persisted for operational visibility and repository-access changes.
 
-The static client still works when needed:
+## Security properties
 
-```text
-OAuth Client ID: chatgpt-purr-git
-OAuth Client Secret: empty
-Token endpoint auth method: none
-```
-
-## Runtime flow
-
-1. ChatGPT reads protected-resource metadata.
-2. ChatGPT discovers the authorization server.
-3. ChatGPT registers a public client or uses the configured static client.
-4. `/oauth/authorize` validates the exact redirect URI, resource, scope, and PKCE challenge.
-5. The authorization request is persisted and bound to a signed HTTP-only cookie.
-6. The owner approves once with `OAUTH_OWNER_CODE`.
-7. The request is consumed and the one-time code is created in one compare-and-set transaction.
-8. `/oauth/token` verifies PKCE, consumes the code, and creates encrypted access and refresh grants atomically.
-9. OAuth calls are proxied to the unchanged MCP server with the existing `SERVER_TOKEN` only after scope checks pass.
-10. Refresh exchanges consume the old refresh token and create the replacement refresh token plus access token in one atomic transaction.
+- GitHub tokens never enter ChatGPT access tokens, browser cookies, logs, or MCP responses.
+- Raw ChatGPT authorization codes and tokens are stored only by SHA-256 identifier.
+- GitHub credentials are encrypted with an identity-specific authenticated-encryption context.
+- User A's credential reference cannot resolve User B's credential.
+- Callback state and signed-cookie binding prevent transaction swapping and replay.
+- Refresh rotation is single-flight across concurrent server processes using the durable store.
+- Webhooks require Octokit signature verification before any credential state changes.
+- Internal credential-bearing MCP traffic is loopback-only.
+- Existing protected-branch, secret-scanning, and write-safety gates remain active.
 
 ## Verification
 
@@ -170,15 +205,33 @@ Run:
 npm run check
 ```
 
-The OAuth tests cover:
+The suite covers:
 
-- PKCE and one-time authorization-code use
-- replay rejection
-- atomic concurrent refresh rotation
-- durable authentication after store restart
-- no raw code, access token, refresh token, or owner code in the store
-- scope hierarchy and tool classification
-- timeout, response-size bounding, and redirect rejection
-- full wrapper integration with filtered `tools/list`
-- denial of insufficient-scope `tools/call`
-- unchanged direct `SERVER_TOKEN` access
+- ChatGPT PKCE and one-time authorization codes
+- MCP refresh-token atomic rotation
+- GitHub callback state binding and replay rejection
+- encrypted GitHub credential persistence
+- two-user credential isolation
+- user-token versus owner-token routing
+- single-flight GitHub token refresh
+- signed revocation and credential invalidation
+- installation lifecycle recording
+- legacy `SERVER_TOKEN` compatibility
+- scope-filtered catalog and dispatch
+- 35-tool catalog parity
+- large commit handling, annotations, and secret blocking
+
+## Deployment order
+
+1. Create the GitHub App and configure callback, webhook, permissions, and events.
+2. Provision the persistent OAuth store volume and independent encryption keys.
+3. Add GitHub App environment variables without removing the existing owner credentials.
+4. Deploy the wrapper branch.
+5. Confirm health and OAuth metadata.
+6. Complete one browser authorization from ChatGPT.
+7. Verify `get_authenticated_user` returns the GitHub account that authorized the app.
+8. Verify one read tool and one bounded write tool.
+9. Confirm all 35 tools remain listed with `github.admin`.
+10. Revoke a test authorization and confirm subsequent calls are rejected.
+
+Rollback is configuration-safe: remove the GitHub App variables and redeploy to return to the existing owner-code OAuth fallback while preserving the legacy `SERVER_TOKEN` route. Do not delete the persistent OAuth store during rollback.
