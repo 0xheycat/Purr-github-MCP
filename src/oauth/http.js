@@ -25,6 +25,7 @@ export function isAuthServerPath(pathname) {
     || pathname === '/oauth/authorize'
     || pathname === '/oauth/authorize/confirm'
     || pathname === '/oauth/github/callback'
+    || pathname === '/oauth/github/webhooks'
     || pathname === '/oauth/token'
     || pathname === '/oauth/register'
     || pathname === '/oauth/revoke'
@@ -63,10 +64,10 @@ function oauthError(error) {
   const code = String(error?.message ?? error);
   return new Set([
     'access_denied', 'github_identity_invalid', 'github_oauth_setup_required',
-    'invalid_client', 'invalid_client_metadata', 'invalid_grant',
-    'invalid_redirect_uri', 'invalid_request', 'invalid_target', 'invalid_token',
-    'oauth_setup_required', 'server_error', 'unsupported_grant_type',
-    'unsupported_response_type', 'unsupported_scope',
+    'github_webhook_setup_required', 'invalid_client', 'invalid_client_metadata',
+    'invalid_grant', 'invalid_redirect_uri', 'invalid_request', 'invalid_target',
+    'invalid_token', 'oauth_setup_required', 'server_error',
+    'unsupported_grant_type', 'unsupported_response_type', 'unsupported_scope',
   ]).has(code) ? code : 'server_error';
 }
 
@@ -126,6 +127,24 @@ async function githubCallback(req, res, url, service, githubAuth, config) {
     sendJson(res, config, oauthError(error) === 'access_denied' ? 403 : 400, {
       error: oauthError(error),
     }, { 'Set-Cookie': clearCookie(req, config) });
+  }
+}
+
+async function githubWebhook(req, res, githubWebhooks, config) {
+  if (!githubWebhooks?.configured) {
+    return sendJson(res, config, 503, { error: 'github_webhook_setup_required' });
+  }
+  try {
+    const payload = (await readRequestBody(req, config.maxBodyBytes)).toString('utf8');
+    await githubWebhooks.receive({
+      id: String(req.headers['x-github-delivery'] ?? ''),
+      name: String(req.headers['x-github-event'] ?? ''),
+      signature: String(req.headers['x-hub-signature-256'] ?? ''),
+      payload,
+    });
+    sendJson(res, config, 202, { accepted: true });
+  } catch {
+    sendJson(res, config, 401, { error: 'invalid_github_webhook' });
   }
 }
 
@@ -189,7 +208,12 @@ async function revoke(req, res, service, config) {
 }
 
 export async function handleOAuthHttp(req, res, url, context) {
-  const { config, service, githubAuth } = context;
+  const {
+    config,
+    service,
+    githubAuth,
+    githubWebhooks,
+  } = context;
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(config));
     res.end();
@@ -208,6 +232,9 @@ export async function handleOAuthHttp(req, res, url, context) {
   }
   if (url.pathname === '/oauth/github/callback' && req.method === 'GET') {
     return githubCallback(req, res, url, service, githubAuth, config);
+  }
+  if (url.pathname === '/oauth/github/webhooks' && req.method === 'POST') {
+    return githubWebhook(req, res, githubWebhooks, config);
   }
   if ((url.pathname === '/oauth/authorize/confirm' || url.pathname === '/authorize') && req.method === 'POST') {
     return authorizeConfirm(req, res, service, config);
