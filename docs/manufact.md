@@ -1,26 +1,17 @@
-# Deploying purr-github-MCP on Manufact
+# Deploying Purr GitHub MCP on Manufact
 
-This project is prepared as a simple Node 22 HTTP service.
+Purr runs as a Node 22 HTTP service. The default `npm start` command launches the public OAuth wrapper and the existing MCP tool server behind it.
 
-## 1. Push the repo to GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/0xheycat/purr-github-MCP.git
-git push -u origin main
-```
-
-## 2. Create a Manufact deployment
-
-Use the GitHub repository as the source.
-
-Runtime:
+## Runtime
 
 ```text
 Node.js 22+
+```
+
+Build command:
+
+```bash
+npm install --omit=dev
 ```
 
 Start command:
@@ -35,59 +26,106 @@ Health check:
 /health
 ```
 
-## 3. Environment variables
+## Existing compatibility mode
 
-Recommended for Notion personal workflow:
-
-```bash
-PORT=3000
-HOST=0.0.0.0
-AUTH_MODE=passthrough
-```
-
-Stricter hosted mode:
+The current owner connection remains supported:
 
 ```bash
 PORT=3000
 HOST=0.0.0.0
-AUTH_MODE=server_token
-SERVER_TOKEN=<random-secret-for-notion>
-GITHUB_TOKEN=<github_pat_xxx>
+SERVER_TOKEN=<existing-private-mcp-token>
+GITHUB_TOKEN=<existing-owner-github-token>
 ```
 
-Optional safety settings:
+The wrapper uses the owner GitHub credential for direct valid `SERVER_TOKEN` requests. The internal MCP child binds only to loopback and does not receive either credential in its environment.
+
+## ChatGPT OAuth
 
 ```bash
-ALLOWED_REPOS=0xheycat/purr-github-MCP
+PUBLIC_BASE_URL=https://<public-host>
+OAUTH_RESOURCE_URL=https://<public-host>/mcp
+OAUTH_ISSUER=https://<authorization-host>
+OAUTH_AUTHORIZATION_SERVERS=https://<authorization-host>
+OAUTH_CLIENT_ID=chatgpt-purr-git
+OAUTH_ALLOWED_REDIRECT_URIS=<exact-chatgpt-callback>
+OAUTH_STORE_PATH=/var/lib/purr-github-mcp/oauth-store.json
+OAUTH_TOKEN_TTL_SECONDS=3600
+OAUTH_REFRESH_TOKEN_TTL_SECONDS=2592000
+```
+
+The OAuth store must be on a persistent volume.
+
+Recommended independent keys:
+
+```bash
+OAUTH_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+OAUTH_COOKIE_KEY=<base64-encoded-32-byte-key>
+OAUTH_SECRET_SOURCE=<independent-secret-source>
+```
+
+## GitHub App user login
+
+Configure the GitHub App with:
+
+```text
+Callback URL: https://<public-host>/oauth/github/callback
+Webhook URL:  https://<public-host>/oauth/github/webhooks
+```
+
+Runtime variables:
+
+```bash
+GITHUB_APP_CLIENT_ID=<github-app-client-id>
+GITHUB_APP_CLIENT_SECRET=<github-app-client-secret>
+GITHUB_APP_CALLBACK_URL=https://<public-host>/oauth/github/callback
+GITHUB_APP_WEBHOOK_SECRET=<github-app-webhook-secret>
+```
+
+The GitHub App variables must be provided as a complete set. Partial configuration fails at startup.
+
+Subscribe to:
+
+```text
+github_app_authorization
+installation
+installation_repositories
+```
+
+## Optional safety settings
+
+```bash
+ALLOWED_REPOS=0xheycat/Purr-github-MCP
 PROTECTED_BRANCHES=main,master,production,staging,release
 BRANCH_PREFIXES=feat/,fix/,docs/,chore/,refactor/,test/,perf/
 ```
 
-## 4. Verify deployment
+These controls remain active for both owner and user-specific credentials.
+
+## Verification
+
+After deployment:
 
 ```bash
-curl https://your-manufact-url/health
+curl https://<public-host>/health
+curl https://<public-host>/.well-known/oauth-protected-resource
+curl https://<authorization-host>/.well-known/oauth-authorization-server
 ```
 
-Then test MCP:
-
-```bash
-curl -s https://your-manufact-url/mcp \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-## 5. Connect Notion
-
-MCP URL:
+Then connect ChatGPT with:
 
 ```text
-https://your-manufact-url/mcp
+MCP URL: https://<public-host>/mcp
+Authentication: OAuth
+Scope: github.admin
 ```
 
-Auth type:
+Acceptance checks:
 
-```text
-Bearer Token
-```
+1. GitHub browser login completes.
+2. `get_authenticated_user` returns the account that authorized the GitHub App.
+3. All 35 tools remain listed for `github.admin`.
+4. A read call and a bounded write call use the authorized user's GitHub identity.
+5. The existing `SERVER_TOKEN` route still uses the owner identity.
+6. Revoking the GitHub App authorization causes subsequent OAuth calls to fail.
+
+Full setup and rollback details are in `docs/chatgpt-oauth.md`.
