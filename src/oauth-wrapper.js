@@ -13,8 +13,16 @@ import { authIssuer, env, envInt, requestOrigin, resourceUrl, sendJson, splitLis
 import { McpOAuthService } from './oauth/service.js';
 import { DurableOAuthStore } from './oauth/store.js';
 
+function assertLoopbackHost(host) {
+  const normalized = String(host).toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+  if (!['127.0.0.1', 'localhost', '::1'].includes(normalized)) {
+    throw new Error('OAuth upstream host must be loopback because the internal server accepts GitHub bearer credentials');
+  }
+}
+
 const port = envInt('PORT', 3000);
 const serverToken = env('SERVER_TOKEN');
+const ownerGitHubToken = env('GITHUB_TOKEN');
 const jwtSecret = env('OAUTH_JWT_SECRET') || serverToken;
 const secretSource = env('OAUTH_SECRET_SOURCE') || jwtSecret;
 const storePath = env('OAUTH_STORE_PATH', join(process.cwd(), 'data', 'oauth-store.json'));
@@ -45,6 +53,10 @@ const config = {
   githubCallbackUrl: env('GITHUB_APP_CALLBACK_URL')
     || (publicBaseUrl ? `${publicBaseUrl}/oauth/github/callback` : ''),
 };
+assertLoopbackHost(config.upstreamHost);
+if (serverToken && !ownerGitHubToken) {
+  throw new Error('The owner GitHub credential is required when SERVER_TOKEN enables compatibility access');
+}
 
 const store = secretSource && serverToken ? new DurableOAuthStore(storePath) : null;
 const secretBox = secretSource
@@ -91,9 +103,17 @@ function serviceForRequest(req) {
   return new GitHubBoundOAuthService(base);
 }
 
+const upstreamEnvironment = {
+  ...process.env,
+  HOST: config.upstreamHost,
+  PORT: String(config.upstreamPort),
+  AUTH_MODE: 'passthrough',
+  SERVER_TOKEN: '',
+  GITHUB_TOKEN: '',
+};
 const upstream = spawn(process.execPath, [config.upstreamEntry], {
   cwd: process.cwd(),
-  env: { ...process.env, HOST: config.upstreamHost, PORT: String(config.upstreamPort) },
+  env: upstreamEnvironment,
   stdio: ['ignore', 'inherit', 'inherit'],
 });
 
@@ -116,6 +136,7 @@ await waitForUpstream();
 const proxy = new ScopedMcpProxy({
   config,
   serverToken,
+  ownerGitHubToken,
   jwtSecret,
   serviceForRequest,
   githubAuth,
