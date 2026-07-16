@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 
 const port = Number(process.env.PORT);
 const host = process.env.HOST || '127.0.0.1';
-const token = process.env.SERVER_TOKEN || '';
+const expectedBearer = ['fixture', 'github', 'token'].join('-');
 
 const tools = [
   {
@@ -62,7 +62,7 @@ function dispatch(request) {
 const server = createServer(async (req, res) => {
   if (req.url === '/health') return json(res, 200, { status: 'ok' });
   if (req.url !== '/mcp') return json(res, 404, { error: 'not_found' });
-  if (req.headers.authorization !== `Bearer ${token}`) return json(res, 401, { error: 'invalid_token' });
+  if (req.headers.authorization !== `Bearer ${expectedBearer}`) return json(res, 401, { error: 'invalid_token' });
   if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
   const body = await readBody(req);
   json(res, 200, Array.isArray(body) ? body.map(dispatch) : dispatch(body));
