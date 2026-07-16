@@ -24,6 +24,7 @@ export function isAuthServerPath(pathname) {
     || pathname === '/.well-known/openid-configuration'
     || pathname === '/oauth/authorize'
     || pathname === '/oauth/authorize/confirm'
+    || pathname === '/oauth/github/callback'
     || pathname === '/oauth/token'
     || pathname === '/oauth/register'
     || pathname === '/oauth/revoke'
@@ -61,24 +62,70 @@ function consentPage(prompt, nonce) {
 function oauthError(error) {
   const code = String(error?.message ?? error);
   return new Set([
-    'access_denied', 'invalid_client', 'invalid_client_metadata', 'invalid_grant',
+    'access_denied', 'github_identity_invalid', 'github_oauth_setup_required',
+    'invalid_client', 'invalid_client_metadata', 'invalid_grant',
     'invalid_redirect_uri', 'invalid_request', 'invalid_target', 'invalid_token',
     'oauth_setup_required', 'server_error', 'unsupported_grant_type',
     'unsupported_response_type', 'unsupported_scope',
   ]).has(code) ? code : 'server_error';
 }
 
-async function authorizeGet(req, res, url, service, config) {
+function redirectToClient(req, res, config, result) {
+  const callback = new URL(result.redirectUri);
+  if (result.code) callback.searchParams.set('code', result.code);
+  if (result.error) callback.searchParams.set('error', result.error);
+  if (result.state) callback.searchParams.set('state', result.state);
+  redirect(res, config, callback.toString(), { 'Set-Cookie': clearCookie(req, config) });
+}
+
+async function authorizeGet(req, res, url, service, githubAuth, config) {
   if (!service) return sendJson(res, config, 503, { error: 'oauth_setup_required' });
   if (!service.configured) return sendJson(res, config, 503, { error: 'oauth_setup_required' });
   try {
     const prompt = await service.beginAuthorization(url.searchParams);
+    if (githubAuth?.configured) {
+      const flow = await githubAuth.beginAuthorization({
+        mcpRequestId: prompt.requestId,
+        csrfToken: prompt.csrfToken,
+      });
+      redirect(res, config, flow.authorizationUrl, {
+        'Set-Cookie': requestCookie(prompt.cookieValue, req, config),
+      });
+      return;
+    }
     const nonce = randomBytes(18).toString('base64url');
     sendHtml(res, config, 200, consentPage(prompt, nonce), nonce, {
       'Set-Cookie': requestCookie(prompt.cookieValue, req, config),
     });
   } catch (error) {
     sendJson(res, config, 400, { error: oauthError(error) });
+  }
+}
+
+async function githubCallback(req, res, url, service, githubAuth, config) {
+  if (!service || !githubAuth?.configured) {
+    return sendJson(res, config, 503, { error: 'github_oauth_setup_required' });
+  }
+  try {
+    const state = url.searchParams.get('state') ?? '';
+    const providerError = url.searchParams.get('error');
+    const result = providerError
+      ? await githubAuth.rejectAuthorization({
+        state,
+        cookieValue: parseCookie(req, COOKIE),
+        mcpService: service,
+      })
+      : await githubAuth.completeAuthorization({
+        state,
+        code: url.searchParams.get('code') ?? '',
+        cookieValue: parseCookie(req, COOKIE),
+        mcpService: service,
+      });
+    redirectToClient(req, res, config, result);
+  } catch (error) {
+    sendJson(res, config, oauthError(error) === 'access_denied' ? 403 : 400, {
+      error: oauthError(error),
+    }, { 'Set-Cookie': clearCookie(req, config) });
   }
 }
 
@@ -95,11 +142,7 @@ async function authorizeConfirm(req, res, service, config) {
       ownerCode: form.get('owner_code') ?? '',
       cookieValue: parseCookie(req, COOKIE),
     });
-    const callback = new URL(result.redirectUri);
-    if (result.code) callback.searchParams.set('code', result.code);
-    if (result.error) callback.searchParams.set('error', result.error);
-    if (result.state) callback.searchParams.set('state', result.state);
-    redirect(res, config, callback.toString(), { 'Set-Cookie': clearCookie(req, config) });
+    redirectToClient(req, res, config, result);
   } catch (error) {
     sendJson(res, config, oauthError(error) === 'access_denied' ? 403 : 400, { error: oauthError(error) });
   }
@@ -146,7 +189,7 @@ async function revoke(req, res, service, config) {
 }
 
 export async function handleOAuthHttp(req, res, url, context) {
-  const { config, service } = context;
+  const { config, service, githubAuth } = context;
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(config));
     res.end();
@@ -160,8 +203,15 @@ export async function handleOAuthHttp(req, res, url, context) {
     if (req.method !== 'GET') return sendJson(res, config, 405, { error: 'method_not_allowed' });
     return sendJson(res, config, 200, authServerMetadata(req, config));
   }
-  if ((url.pathname === '/oauth/authorize' || url.pathname === '/authorize') && req.method === 'GET') return authorizeGet(req, res, url, service, config);
-  if ((url.pathname === '/oauth/authorize/confirm' || url.pathname === '/authorize') && req.method === 'POST') return authorizeConfirm(req, res, service, config);
+  if ((url.pathname === '/oauth/authorize' || url.pathname === '/authorize') && req.method === 'GET') {
+    return authorizeGet(req, res, url, service, githubAuth, config);
+  }
+  if (url.pathname === '/oauth/github/callback' && req.method === 'GET') {
+    return githubCallback(req, res, url, service, githubAuth, config);
+  }
+  if ((url.pathname === '/oauth/authorize/confirm' || url.pathname === '/authorize') && req.method === 'POST') {
+    return authorizeConfirm(req, res, service, config);
+  }
   if ((url.pathname === '/oauth/token' || url.pathname === '/token') && req.method === 'POST') return token(req, res, service, config);
   if ((url.pathname === '/oauth/register' || url.pathname === '/register') && req.method === 'POST') return register(req, res, service, config);
   if ((url.pathname === '/oauth/revoke' || url.pathname === '/revoke') && req.method === 'POST') return revoke(req, res, service, config);
