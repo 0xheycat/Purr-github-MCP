@@ -1,172 +1,184 @@
-# ChatGPT OAuth / Remote MCP Setup
+# ChatGPT OAuth for Purr GitHub MCP
 
-This repo can serve both sides needed for ChatGPT OAuth MCP usage:
+This OAuth layer sits in front of the existing Purr GitHub MCP server. It does not replace the current GitHub tools, catalog, safety checks, transport, or execution logic.
 
-```txt
-mcp.pursr.xyz      -> MCP resource server
-auth-git.pursr.xyz -> OAuth authorization server
+The existing `SERVER_TOKEN` and passthrough authentication paths remain supported. A direct valid `SERVER_TOKEN` keeps full legacy access, so installed non-OAuth clients are not forced through the new scope model.
+
+## What the OAuth layer adds
+
+- OAuth 2.1 authorization code flow with mandatory PKCE S256
+- persistent dynamic client registration
+- opaque access and refresh tokens
+- one-time authorization codes stored only by SHA-256 digest
+- atomic authorization-code consumption and refresh-token rotation
+- durable JSON storage with an exclusive lock, compare-and-set revisions, fsync, and atomic rename
+- AES-256-GCM encrypted grant records
+- signed, HTTP-only consent cookies
+- bounded outbound catalog reads with timeout and redirect rejection
+- scope-filtered `tools/list` and scope enforcement before `tools/call`
+- compatibility validation for short-lived JWTs issued by the previous OAuth wrapper
+
+## Scope hierarchy
+
+The scopes are hierarchical:
+
+```text
+github.read -> github.plan -> github.write -> github.admin
 ```
 
-No separate OAuth repo is required. Deploy this same codebase behind both domains, or route both domains to the same running app.
+A higher scope includes every lower scope.
 
-## Public MCP endpoints
+| Scope | Typical access |
+|---|---|
+| `github.read` | repository, branch, issue, PR, commit, tree, and file reads |
+| `github.plan` | read access plus verification planning tools |
+| `github.write` | branch, commit, issue, PR, comment, and other normal write tools |
+| `github.admin` | all tools, including repository creation, merge, and delete operations |
 
-```txt
-POST /mcp
-GET  /mcp
-GET  /.well-known/oauth-protected-resource
-GET  /.well-known/oauth-protected-resource/mcp
+Tool scope is derived from its existing annotations. Read-only tools default to `github.read`; other tools default to `github.write`. Only the small plan/admin override sets need special classification. New normally annotated tools do not require changes to the OAuth service.
+
+For compatibility with the previous ChatGPT configuration:
+
+```text
+read:user -> github.read
+user:email -> github.read
+repo -> github.admin
 ```
 
-For `https://mcp.pursr.xyz/mcp`, the protected resource metadata URL is:
+The broad legacy `repo` request remains full-access so an already configured ChatGPT client does not silently lose tools after deployment. New clients should request the canonical `github.*` scopes.
 
-```txt
-https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp
+## Endpoints
+
+Protected-resource discovery:
+
+```text
+GET /.well-known/oauth-protected-resource
+GET /.well-known/oauth-protected-resource/mcp
 ```
 
-## Public OAuth endpoints
+Authorization-server discovery:
 
-```txt
-GET  /.well-known/oauth-authorization-server
-GET  /.well-known/openid-configuration
-GET  /authorize
-POST /authorize
-POST /token
-POST /register
-GET  /jwks.json
+```text
+GET /.well-known/oauth-authorization-server
+GET /.well-known/openid-configuration
 ```
 
-For `https://auth-git.pursr.xyz`, the authorization server metadata URL is:
+OAuth endpoints:
 
-```txt
-https://auth-git.pursr.xyz/.well-known/oauth-authorization-server
+```text
+GET  /oauth/authorize
+POST /oauth/authorize/confirm
+POST /oauth/token
+POST /oauth/register
+POST /oauth/revoke
 ```
 
-## Production env for `mcp.pursr.xyz`
+Legacy aliases remain available:
+
+```text
+/authorize
+/token
+/register
+/revoke
+```
+
+## Required production environment
+
+The existing MCP server-token setup remains required for OAuth proxying:
 
 ```bash
 AUTH_MODE=server_token
-SERVER_TOKEN=<long-random-server-token>
-GITHUB_TOKEN=<github-pat-or-fine-grained-token>
-
-PUBLIC_BASE_URL=https://mcp.pursr.xyz
-OAUTH_RESOURCE_URL=https://mcp.pursr.xyz/mcp
-OAUTH_AUTHORIZATION_SERVERS=https://auth-git.pursr.xyz
-OAUTH_RESOURCE_NAME="Purr GitHub MCP"
-OAUTH_REALM=purr-github-mcp
-OAUTH_SCOPES_SUPPORTED="repo read:user user:email"
-
-OAUTH_ISSUER=https://auth-git.pursr.xyz
-OAUTH_CLIENT_ID=chatgpt-purr-git
-OAUTH_OWNER_CODE=<private-approval-code-you-type-in-browser>
-OAUTH_JWT_SECRET=<long-random-jwt-secret-shared-with-auth-domain>
-OAUTH_TOKEN_TTL_SECONDS=3600
-
-ALLOW_PROTECTED_WRITES=false
-ALLOW_REPO_CREATE=false
-ALLOW_WORKFLOW_WRITES=false
-ALLOW_BINARY=false
-ALLOW_IMAGES=true
+SERVER_TOKEN=<existing-private-server-token>
+GITHUB_TOKEN=<existing-private-github-token>
 ```
 
-## Production env for `auth-git.pursr.xyz`
-
-Use the same repo and same start command. The important auth env is:
+OAuth configuration:
 
 ```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=<same-long-random-server-token-as-mcp>
-GITHUB_TOKEN=<same-github-token-or-empty-if-only-auth-domain>
-
 PUBLIC_BASE_URL=https://mcp.pursr.xyz
 OAUTH_RESOURCE_URL=https://mcp.pursr.xyz/mcp
+OAUTH_ISSUER=https://auth-git.pursr.xyz
 OAUTH_AUTHORIZATION_SERVERS=https://auth-git.pursr.xyz
 
-OAUTH_ISSUER=https://auth-git.pursr.xyz
 OAUTH_CLIENT_ID=chatgpt-purr-git
-OAUTH_ALLOWED_REDIRECT_URIS=<chatgpt-callback-url-from-the-new-app-screen>
-OAUTH_OWNER_CODE=<private-approval-code-you-type-in-browser>
-OAUTH_JWT_SECRET=<same-long-random-jwt-secret-as-mcp>
-OAUTH_TOKEN_TTL_SECONDS=3600
+OAUTH_ALLOWED_REDIRECT_URIS=<exact-callback-url-shown-by-chatgpt>
+OAUTH_OWNER_CODE=<private-browser-approval-code>
 OAUTH_SUBJECT=0xheycat
+
+OAUTH_TOKEN_TTL_SECONDS=3600
+OAUTH_REFRESH_TOKEN_TTL_SECONDS=2592000
+OAUTH_STORE_PATH=/var/lib/purr-github-mcp/oauth-store.json
 ```
 
-If both domains route to the same process, one env set is enough as long as it includes all values above.
+`OAUTH_STORE_PATH` must point to a persistent volume in production. Its parent directory is created automatically. The store file is created with mode `0600`.
 
-## ChatGPT New App setup
+Encryption and cookie keys may be supplied explicitly as base64-encoded 32-byte values:
+
+```bash
+OAUTH_ENCRYPTION_KEY=<base64-32-byte-key>
+OAUTH_COOKIE_KEY=<base64-32-byte-key>
+```
+
+When omitted, separate keys are derived from `OAUTH_SECRET_SOURCE`, then `OAUTH_JWT_SECRET`, then the existing `SERVER_TOKEN`. Explicit independent keys are recommended for production key management.
+
+## ChatGPT setup
 
 Use:
 
-```txt
+```text
 Name: MCP github
 Server URL: https://mcp.pursr.xyz/mcp
 Authentication: OAuth
 ```
 
-Advanced OAuth settings:
+Recommended OAuth settings:
 
-```txt
-Registration method: User-Defined OAuth Client
+```text
+Registration method: Dynamic Client Registration
+Token endpoint auth method: none
+Scopes: github.admin
+```
+
+A narrower client can request `github.read`, `github.plan`, or `github.write` instead.
+
+The static client still works when needed:
+
+```text
 OAuth Client ID: chatgpt-purr-git
 OAuth Client Secret: empty
 Token endpoint auth method: none
-Scopes: repo read:user user:email
 ```
-
-Copy the callback URL shown by ChatGPT and put it into:
-
-```bash
-OAUTH_ALLOWED_REDIRECT_URIS=<callback-url>
-```
-
-Then redeploy before clicking Create or Connect.
 
 ## Runtime flow
 
-1. ChatGPT reads `https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp`.
-2. The MCP metadata points to `https://auth-git.pursr.xyz`.
-3. ChatGPT starts OAuth authorization code + PKCE.
-4. `/authorize` shows a small owner approval page.
-5. Enter `OAUTH_OWNER_CODE`.
-6. `/token` returns a short-lived bearer token.
-7. ChatGPT calls `/mcp` with that token.
-8. The wrapper validates the token and proxies to the upstream MCP server with `SERVER_TOKEN`.
+1. ChatGPT reads protected-resource metadata.
+2. ChatGPT discovers the authorization server.
+3. ChatGPT registers a public client or uses the configured static client.
+4. `/oauth/authorize` validates the exact redirect URI, resource, scope, and PKCE challenge.
+5. The authorization request is persisted and bound to a signed HTTP-only cookie.
+6. The owner approves once with `OAUTH_OWNER_CODE`.
+7. The request is consumed and the one-time code is created in one compare-and-set transaction.
+8. `/oauth/token` verifies PKCE, consumes the code, and creates encrypted access and refresh grants atomically.
+9. OAuth calls are proxied to the unchanged MCP server with the existing `SERVER_TOKEN` only after scope checks pass.
+10. Refresh exchanges consume the old refresh token and create the replacement refresh token plus access token in one atomic transaction.
 
-## Test commands
+## Verification
 
-```powershell
-Invoke-RestMethod "https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp" | ConvertTo-Json -Depth 10
+Run:
+
+```bash
+npm run check
 ```
 
-```powershell
-Invoke-RestMethod "https://auth-git.pursr.xyz/.well-known/oauth-authorization-server" | ConvertTo-Json -Depth 10
-```
+The OAuth tests cover:
 
-Expected MCP metadata should include:
-
-```json
-{
-  "resource": "https://mcp.pursr.xyz/mcp",
-  "authorization_servers": ["https://auth-git.pursr.xyz"]
-}
-```
-
-Expected auth metadata should include:
-
-```json
-{
-  "issuer": "https://auth-git.pursr.xyz",
-  "authorization_endpoint": "https://auth-git.pursr.xyz/authorize",
-  "token_endpoint": "https://auth-git.pursr.xyz/token",
-  "registration_endpoint": "https://auth-git.pursr.xyz/register",
-  "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["none"]
-}
-```
-
-## Security notes
-
-- Keep write tools behind ChatGPT-side approval.
-- Keep `ALLOW_REPO_CREATE=false`, `ALLOW_PROTECTED_WRITES=false`, and `ALLOW_WORKFLOW_WRITES=false` unless explicitly needed.
-- Keep `OAUTH_OWNER_CODE`, `SERVER_TOKEN`, `GITHUB_TOKEN`, and `OAUTH_JWT_SECRET` private.
-- Use long random values from `openssl rand -hex 32`.
+- PKCE and one-time authorization-code use
+- replay rejection
+- atomic concurrent refresh rotation
+- durable authentication after store restart
+- no raw code, access token, refresh token, or owner code in the store
+- scope hierarchy and tool classification
+- timeout, response-size bounding, and redirect rejection
+- full wrapper integration with filtered `tools/list`
+- denial of insufficient-scope `tools/call`
+- unchanged direct `SERVER_TOKEN` access
