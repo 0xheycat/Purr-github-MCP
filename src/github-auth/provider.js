@@ -65,6 +65,11 @@ export class OctokitGitHubAppProvider {
     if (this.#clientId.length > 300) throw new Error('GitHub App client ID is invalid');
     if (this.#clientSecret.length > 1_000) throw new Error('GitHub App client secret is invalid');
     if (this.#callbackUrl.length > 2_000) throw new Error('GitHub App callback URL is invalid');
+    const configuredFields = [this.#clientId, this.#clientSecret, this.#callbackUrl]
+      .filter((value) => value.length > 0).length;
+    if (configuredFields !== 0 && configuredFields !== 3) {
+      throw new Error('GitHub App OAuth configuration must include client ID, client secret, and callback URL together');
+    }
     if (this.configured) {
       const callback = new URL(this.#callbackUrl);
       if (callback.protocol !== 'https:' && callback.hostname !== 'localhost' && callback.hostname !== '127.0.0.1') {
