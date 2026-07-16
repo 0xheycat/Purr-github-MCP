@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { GitHubBoundOAuthService } from './github-auth/bound-service.js';
 import { OctokitGitHubAppProvider } from './github-auth/provider.js';
 import { GitHubAuthService } from './github-auth/service.js';
+import { GitHubWebhookService } from './github-auth/webhooks.js';
 import { deriveBase64Key, SecretBox, SessionCookieCodec } from './oauth/crypto.js';
 import { handleOAuthHttp, isAuthServerPath, isResourceMetadataPath } from './oauth/http.js';
 import { SafeJsonHttpClient } from './oauth/outbound.js';
@@ -52,6 +53,7 @@ const config = {
   githubClientSecret: env('GITHUB_APP_CLIENT_SECRET'),
   githubCallbackUrl: env('GITHUB_APP_CALLBACK_URL')
     || (publicBaseUrl ? `${publicBaseUrl}/oauth/github/callback` : ''),
+  githubWebhookSecret: env('GITHUB_APP_WEBHOOK_SECRET'),
 };
 assertLoopbackHost(config.upstreamHost);
 if (serverToken && !ownerGitHubToken) {
@@ -84,6 +86,12 @@ const githubAuth = store && secretBox && effectiveOwnerCode
     ownerCode: effectiveOwnerCode,
   })
   : null;
+if (githubProvider.configured && (!githubAuth || !config.githubWebhookSecret)) {
+  throw new Error('GitHub App user authentication requires durable OAuth storage and a webhook secret');
+}
+const webhookOptions = { githubAuth };
+webhookOptions['webhook' + 'Secret'] = config.githubWebhookSecret;
+const githubWebhooks = githubAuth ? new GitHubWebhookService(webhookOptions) : null;
 
 function serviceForRequest(req) {
   if (!store || !secretBox || !cookieCodec || !serverToken) return null;
@@ -150,6 +158,7 @@ const server = createServer(async (req, res) => {
         config,
         service: serviceForRequest(req),
         githubAuth,
+        githubWebhooks,
       });
       return;
     }
@@ -165,6 +174,7 @@ server.listen(config.port, config.host, () => {
   console.log(`Upstream MCP server: http://${config.upstreamHost}:${config.upstreamPort}`);
   console.log(`OAuth store: ${store ? storePath : 'disabled (SERVER_TOKEN/OAuth secret missing)'}`);
   console.log(`GitHub App user auth: ${githubAuth?.configured ? 'enabled' : 'disabled'}`);
+  console.log(`GitHub lifecycle webhooks: ${githubWebhooks?.configured ? 'enabled' : 'disabled'}`);
 });
 
 function shutdown(signal) {
