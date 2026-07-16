@@ -52,7 +52,9 @@ const config = {
   githubClientId: env('GITHUB_APP_CLIENT_ID'),
   githubClientSecret: env('GITHUB_APP_CLIENT_SECRET'),
   githubCallbackUrl: env('GITHUB_APP_CALLBACK_URL')
-    || (publicBaseUrl ? `${publicBaseUrl}/oauth/github/callback` : ''),
+    || ((env('GITHUB_APP_CLIENT_ID') || env('GITHUB_APP_CLIENT_SECRET')) && publicBaseUrl
+      ? `${publicBaseUrl}/oauth/github/callback`
+      : ''),
   githubWebhookSecret: env('GITHUB_APP_WEBHOOK_SECRET'),
 };
 assertLoopbackHost(config.upstreamHost);
