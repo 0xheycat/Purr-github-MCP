@@ -1,0 +1,3 @@
+Purr GitHub MCP live tool matrix
+branch=test/mcp-live-feature-20260717
+purpose=bounded production capability verification
