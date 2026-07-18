@@ -1,10 +1,12 @@
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, open, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { promisify } from 'node:util';
 import { extraTools } from './extensions.js';
 
 const VERSION = '1.0.0';
@@ -12,6 +14,7 @@ const MCP_PROTOCOL_VERSION = '2024-11-05';
 const GITHUB_BLOB_HARD_LIMIT_BYTES = 100_000_000;
 const GITHUB_LARGE_FILE_WARNING_BYTES = 50_000_000;
 const SAMPLE_BYTES = 8192;
+const execFileAsync = promisify(execFile);
 
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
@@ -411,6 +414,43 @@ async function createBlobFromFile(token, owner, repo, filePath) {
     headers: { 'Content-Type': 'application/json' },
     body: Readable.from(base64JsonBodyFromFile(filePath)),
   });
+}
+
+
+function normalizeUploadedArchive(value) {
+  const files = Array.isArray(value) ? value : [value];
+  if (files.length !== 1) throw new Error('archive_file must contain exactly one ZIP file.');
+  const file = files[0];
+  if (!file || typeof file !== 'object') throw new Error('archive_file must be a ChatGPT file reference.');
+  const downloadUrl = file.download_url ?? file.url;
+  if (typeof downloadUrl !== 'string' || !downloadUrl) throw new Error('archive_file is missing download_url.');
+  const name = typeof file.name === 'string' && file.name ? file.name : 'archive.zip';
+  if (!name.toLowerCase().endsWith('.zip')) throw new Error('archive_file must be a .zip archive.');
+  return { downloadUrl, name };
+}
+
+function validateZipEntry(rawEntry) {
+  if (typeof rawEntry !== 'string' || !rawEntry) throw new Error('ZIP contains an empty path.');
+  if (rawEntry.includes('\0') || rawEntry.includes('\\')) throw new Error(`ZIP path "${rawEntry}" is unsafe.`);
+  if (rawEntry.startsWith('/') || /^[A-Za-z]:/.test(rawEntry)) throw new Error(`ZIP path "${rawEntry}" is absolute.`);
+  const segments = rawEntry.split('/');
+  if (segments.some((segment) => segment === '..')) throw new Error(`ZIP path "${rawEntry}" contains traversal.`);
+  const withoutTrailingSlash = rawEntry.endsWith('/') ? rawEntry.slice(0, -1) : rawEntry;
+  if (!withoutTrailingSlash || withoutTrailingSlash.split('/').some((segment) => !segment || segment === '.')) {
+    throw new Error(`ZIP path "${rawEntry}" is not normalized.`);
+  }
+  return withoutTrailingSlash;
+}
+
+async function readFileSample(filePath) {
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(SAMPLE_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
 function base64EncodeUtf8(input) {
@@ -1147,6 +1187,126 @@ const tools = [
     },
   },
   {
+    name: 'commit_zip_archive',
+    description: 'Accept one uploaded ZIP file, validate and secret-scan its entries, then commit the complete archive tree to an existing branch in one Git commit.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['archive_file'] },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        branch: { type: 'string' },
+        archive_file: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              file_id: { type: 'string' },
+              download_url: { type: 'string' },
+              name: { type: 'string' },
+              mime_type: { type: 'string' },
+              size: { type: 'number' },
+            },
+            required: ['download_url'],
+          },
+        },
+        commit_message: { type: 'string' },
+        expected_head: { type: 'string', description: 'Optional exact branch HEAD required before commit.' },
+        expected_file_count: { type: 'number', description: 'Optional exact number of non-directory ZIP entries.' },
+      },
+      required: ['repo', 'branch', 'archive_file', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      validateBranch(args.branch, { protect: true });
+      const archive = normalizeUploadedArchive(args.archive_file);
+      const expectedHead = args.expected_head ? String(args.expected_head) : null;
+      if (expectedHead) {
+        const currentHead = await getBranchSha(ctx.githubToken, owner, repo, args.branch);
+        if (currentHead !== expectedHead) throw new Error(`Branch HEAD mismatch. Expected ${expectedHead}, found ${currentHead}.`);
+      }
+
+      let downloaded;
+      let extractDir;
+      try {
+        downloaded = await downloadSourceToTemp(archive.downloadUrl, archive.name);
+        extractDir = await mkdtemp(join(tmpdir(), 'purr-github-zip-'));
+        const listed = await execFileAsync('unzip', ['-Z1', downloaded.tempPath], {
+          encoding: 'utf8',
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        const rawEntries = listed.stdout.split(/\r?\n/).filter(Boolean);
+        if (rawEntries.length === 0) throw new Error('ZIP archive is empty.');
+
+        const files = [];
+        const seen = new Set();
+        for (const rawEntry of rawEntries) {
+          const normalized = validateZipEntry(rawEntry);
+          if (rawEntry.endsWith('/')) continue;
+          const path = validatePath(normalized, { allowBinary: true, allowImages: true });
+          if (path !== normalized) throw new Error(`ZIP path "${rawEntry}" changed during normalization.`);
+          if (seen.has(path)) throw new Error(`ZIP contains duplicate path "${path}".`);
+          seen.add(path);
+          files.push({ rawEntry, path });
+        }
+        if (files.length === 0) throw new Error('ZIP archive contains no files.');
+        if (limitEnabled(config.maxFilesPerCommit) && files.length > config.maxFilesPerCommit) {
+          throw new Error(`Too many files. Max ${config.maxFilesPerCommit}.`);
+        }
+        if (args.expected_file_count !== undefined && files.length !== Number(args.expected_file_count)) {
+          throw new Error(`ZIP file count mismatch. Expected ${Number(args.expected_file_count)}, found ${files.length}.`);
+        }
+
+        await execFileAsync('unzip', ['-qq', downloaded.tempPath, '-d', extractDir], {
+          encoding: 'utf8',
+          maxBuffer: 4 * 1024 * 1024,
+        });
+
+        const extractRoot = `${await realpath(extractDir)}/`;
+        const treeEntries = [];
+        let totalBytes = 0;
+        for (const file of files) {
+          const filePath = join(extractDir, file.path);
+          const resolved = await realpath(filePath);
+          if (!resolved.startsWith(extractRoot)) throw new Error(`ZIP path "${file.path}" escaped the extraction root.`);
+          const info = await lstat(filePath);
+          if (!info.isFile() || info.isSymbolicLink()) throw new Error(`ZIP path "${file.path}" is not a regular file.`);
+          assertLargeFileSize(info.size, file.path);
+          totalBytes += info.size;
+          if (limitEnabled(config.maxBytesPerCommit) && totalBytes > config.maxBytesPerCommit) {
+            throw new Error(`Commit payload is too large. Max ${config.maxBytesPerCommit} bytes.`);
+          }
+          const sample = await readFileSample(filePath);
+          if (!sampleLooksBinary(sample, '')) await scanTextFileForSecrets(filePath, file.path);
+          const blob = await createBlobFromFile(ctx.githubToken, owner, repo, filePath);
+          treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha });
+        }
+
+        if (expectedHead) {
+          const currentHead = await getBranchSha(ctx.githubToken, owner, repo, args.branch);
+          if (currentHead !== expectedHead) throw new Error(`Branch HEAD changed during upload. Expected ${expectedHead}, found ${currentHead}.`);
+        }
+        const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.branch, treeEntries, String(args.commit_message));
+        return textResult({
+          success: true,
+          repo: `${owner}/${repo}`,
+          branch: args.branch,
+          archive: archive.name,
+          files_committed: treeEntries.map((entry) => entry.path),
+          file_count: treeEntries.length,
+          bytes: totalBytes,
+          ...commit,
+        });
+      } finally {
+        if (extractDir) await rm(extractDir, { recursive: true, force: true });
+        if (downloaded?.tempPath) await rm(downloaded.tempPath, { force: true });
+        if (downloaded?.tempDir) await rm(downloaded.tempDir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'commit_files_from_manifest_url',
     description: 'Download a JSON manifest of files/source_url entries and commit all blobs in one call.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
@@ -1455,11 +1615,12 @@ const tools = [
 ];
 
 function toolDefinitions() {
-  return tools.map(({ name, description, inputSchema, annotations }) => ({
+  return tools.map(({ name, description, inputSchema, annotations, _meta }) => ({
     name,
     description,
     inputSchema,
     ...(annotations ? { annotations } : {}),
+    ...(_meta ? { _meta } : {}),
   }));
 }
 
