@@ -424,7 +424,9 @@ function normalizeUploadedArchive(value) {
   if (!file || typeof file !== 'object') throw new Error('archive_file must be a ChatGPT file reference.');
   const downloadUrl = file.download_url ?? file.url;
   if (typeof downloadUrl !== 'string' || !downloadUrl) throw new Error('archive_file is missing download_url.');
-  const name = typeof file.name === 'string' && file.name ? file.name : 'archive.zip';
+  const name = typeof file.file_name === 'string' && file.file_name
+    ? file.file_name
+    : (typeof file.name === 'string' && file.name ? file.name : 'archive.zip');
   if (!name.toLowerCase().endsWith('.zip')) throw new Error('archive_file must be a .zip archive.');
   return { downloadUrl, name };
 }
@@ -1197,20 +1199,14 @@ const tools = [
         repo: { type: 'string' },
         branch: { type: 'string' },
         archive_file: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 1,
-          items: {
-            type: 'object',
-            properties: {
-              file_id: { type: 'string' },
-              download_url: { type: 'string' },
-              name: { type: 'string' },
-              mime_type: { type: 'string' },
-              size: { type: 'number' },
-            },
-            required: ['download_url'],
+          type: 'object',
+          properties: {
+            file_id: { type: 'string' },
+            download_url: { type: 'string' },
+            file_name: { type: 'string' },
+            mime_type: { type: 'string' },
           },
+          required: ['file_id', 'download_url'],
         },
         commit_message: { type: 'string' },
         expected_head: { type: 'string', description: 'Optional exact branch HEAD required before commit.' },
