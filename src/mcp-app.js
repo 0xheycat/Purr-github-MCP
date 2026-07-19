@@ -5,7 +5,7 @@
 // Repository operations, authentication, and write policy remain owned by
 // Purr GitHub MCP; this module only adds resources and structured UI cards.
 
-export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench.html';
+export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v2.html';
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
@@ -20,9 +20,6 @@ export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   },
 });
 
-const EXT_APPS_MODULE =
-  'https://cdn.jsdelivr.net/npm/@modelcontextprotocol/ext-apps@1.7.2/+esm';
-
 const EXCLUDED_TOOLS = new Set([
   'read_operating_guide',
   'verify_mcp_deploy',
@@ -35,7 +32,7 @@ export function githubMcpAppToolMeta(toolName) {
       resourceUri: GITHUB_MCP_APP_URI,
       visibility: ['model'],
     },
-    'ui/resourceUri': GITHUB_MCP_APP_URI,
+    'openai/outputTemplate': GITHUB_MCP_APP_URI,
   };
 }
 
@@ -110,14 +107,8 @@ export function listGithubMcpAppResources() {
   ];
 }
 
-export function readGithubMcpAppResource(uri, origin = '') {
+export function readGithubMcpAppResource(uri) {
   if (uri !== GITHUB_MCP_APP_URI) return null;
-  const resourceDomains = ['https://cdn.jsdelivr.net'];
-  const connectDomains = ['https://cdn.jsdelivr.net'];
-  if (origin) {
-    resourceDomains.unshift(origin.replace(/\/+$/, ''));
-    connectDomains.unshift(origin.replace(/\/+$/, ''));
-  }
   return {
     contents: [
       {
@@ -126,7 +117,6 @@ export function readGithubMcpAppResource(uri, origin = '') {
         text: githubMcpAppHtml(),
         _meta: {
           ui: {
-            csp: { resourceDomains, connectDomains },
             prefersBorder: true,
           },
         },
@@ -279,68 +269,70 @@ function githubMcpAppHtml() {
   </head>
   <body>
     <main id="app" class="shell"><section class="empty">Connecting to Purr GitHub…</section></main>
-    <script type="module">
-      import {
-        App,
-        applyDocumentTheme,
-        applyHostFonts,
-        applyHostStyleVariables
-      } from "${EXT_APPS_MODULE}";
-
+    <script>
       const root = document.querySelector("#app");
-      let card = null;
       let expanded = true;
-      let connected = false;
-      let connectionError = null;
-      const app = new App({ name: "purr-github-workbench", version: "0.1.0" }, {});
+      let card = normalizeResult(
+        window.openai?.toolOutput,
+        window.openai?.toolResponseMetadata
+      );
 
-      app.ontoolresult = (result) => {
-        const structured = result?.structuredContent;
-        const meta = result?._meta || {};
-        card = structured?.kind === "purr-github-card"
-          ? structured
-          : {
-              kind: "purr-github-card",
-              tool: meta.tool || "github",
-              status: result?.isError ? "failed" : "ready",
-              isError: Boolean(result?.isError),
-              payload: structured || parseText(result?.content)
-            };
+      applyHostGlobals(window.openai || {});
+      render();
+
+      window.addEventListener("openai:set_globals", (event) => {
+        const globals = event.detail?.globals || {};
+        applyHostGlobals(globals);
+        const output = globals.toolOutput ?? window.openai?.toolOutput;
+        const metadata = globals.toolResponseMetadata ?? window.openai?.toolResponseMetadata;
+        const next = normalizeResult(output, metadata);
+        if (next) card = next;
         render();
-      };
+      }, { passive: true });
 
-      app.onhostcontextchanged = (context) => {
-        const current = app.getHostContext() || {};
-        const next = { ...current, ...context };
-        if (next.theme) applyDocumentTheme(next.theme);
-        if (next.styles?.variables) applyHostStyleVariables(next.styles.variables);
-        if (next.styles?.css?.fonts) applyHostFonts(next.styles.css.fonts);
-        const insets = next.safeAreaInsets;
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.method !== "ui/notifications/tool-result") return;
+        const next = normalizeResult(message.params);
+        if (next) card = next;
+        render();
+      }, { passive: true });
+
+      function normalizeResult(result, metadata = {}) {
+        if (result === undefined || result === null) return null;
+        const full = result && typeof result === "object" ? result : {};
+        const structured = full.structuredContent ?? result;
+        if (structured?.kind === "purr-github-card") return structured;
+        const meta = full._meta || metadata || {};
+        return {
+          kind: "purr-github-card",
+          tool: meta.tool || "github",
+          status: full.isError ? "failed" : "ready",
+          isError: Boolean(full.isError),
+          payload: structured ?? parseText(full.content)
+        };
+      }
+
+      function applyHostGlobals(globals) {
+        if (globals.theme) document.documentElement.style.colorScheme = globals.theme;
+        const variables = globals.styles?.variables;
+        if (variables && typeof variables === "object") {
+          for (const [name, value] of Object.entries(variables)) {
+            if (typeof value === "string") document.documentElement.style.setProperty(name, value);
+          }
+        }
+        const insets = globals.safeAreaInsets;
         if (insets) {
           document.body.style.padding = insets.top + "px " + insets.right + "px " + insets.bottom + "px " + insets.left + "px";
         }
-      };
-
-      try {
-        await app.connect();
-        const context = app.getHostContext();
-        if (context?.theme) applyDocumentTheme(context.theme);
-        if (context?.styles?.variables) applyHostStyleVariables(context.styles.variables);
-        if (context?.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
-        connected = true;
-      } catch (error) {
-        connectionError = error instanceof Error ? error.message : String(error);
       }
-      render();
 
       function render() {
         if (!root) return;
-        if (connectionError) {
-          root.replaceChildren(node("section", "empty", "UI connection failed: " + connectionError));
-          return;
-        }
-        if (!connected || !card) {
-          root.replaceChildren(node("section", "empty", connected ? "Waiting for a tool result." : "Connecting to Purr GitHub…"));
+        if (!card) {
+          root.replaceChildren(node("section", "empty", "Waiting for a tool result."));
           return;
         }
 
