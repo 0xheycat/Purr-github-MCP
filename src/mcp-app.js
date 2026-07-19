@@ -7,6 +7,18 @@
 
 export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench.html';
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
+export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'tool', 'status', 'isError', 'payload'],
+  properties: {
+    kind: { type: 'string', const: 'purr-github-card' },
+    tool: { type: 'string', minLength: 1 },
+    status: { type: 'string', minLength: 1 },
+    isError: { type: 'boolean' },
+    payload: {},
+  },
+});
 
 const EXT_APPS_MODULE =
   'https://cdn.jsdelivr.net/npm/@modelcontextprotocol/ext-apps@1.7.2/+esm';
@@ -44,19 +56,23 @@ export function decorateGithubTools(tools) {
   return tools.map((tool) => {
     if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return tool;
     const meta = githubMcpAppToolMeta(tool.name);
-    if (!meta) return tool;
     return {
       ...tool,
-      _meta: {
-        ...objectRecord(tool._meta),
-        ...meta,
-      },
+      outputSchema: GITHUB_MCP_OUTPUT_SCHEMA,
+      ...(meta
+        ? {
+            _meta: {
+              ...objectRecord(tool._meta),
+              ...meta,
+            },
+          }
+        : {}),
     };
   });
 }
 
 export function decorateGithubToolResult(tool, result) {
-  if (!githubMcpAppToolMeta(tool) || !result || typeof result !== 'object' || Array.isArray(result)) {
+  if (!tool || !result || typeof result !== 'object' || Array.isArray(result)) {
     return result;
   }
   const payload = extractPayload(result);

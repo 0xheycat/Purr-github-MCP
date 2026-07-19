@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   GITHUB_MCP_APP_MIME_TYPE,
   GITHUB_MCP_APP_URI,
+  GITHUB_MCP_OUTPUT_SCHEMA,
   decorateGithubInitialize,
   decorateGithubToolResult,
   decorateGithubTools,
@@ -22,6 +23,8 @@ const tools = decorateGithubTools([
   { name: 'get_repository', inputSchema: { type: 'object' } },
   { name: 'read_operating_guide', inputSchema: { type: 'object' } },
 ]);
+assert.deepEqual(tools[0].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
+assert.deepEqual(tools[1].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
 assert.deepEqual(tools[0]._meta, {
   ui: { resourceUri: GITHUB_MCP_APP_URI, visibility: ['model'] },
   'ui/resourceUri': GITHUB_MCP_APP_URI,
@@ -41,6 +44,17 @@ assert.deepEqual(result.structuredContent, {
 assert.deepEqual(result._meta, {
   tool: 'compare_refs',
   card: { kind: 'purr-github-card', tool: 'compare_refs' },
+});
+
+const helperResult = decorateGithubToolResult('read_operating_guide', {
+  content: [{ type: 'text', text: JSON.stringify({ service: 'github' }) }],
+});
+assert.deepEqual(helperResult.structuredContent, {
+  kind: 'purr-github-card',
+  tool: 'read_operating_guide',
+  status: 'ready',
+  isError: false,
+  payload: { service: 'github' },
 });
 
 const resources = listGithubMcpAppResources();
