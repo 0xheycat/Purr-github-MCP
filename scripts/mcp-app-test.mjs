@@ -27,7 +27,7 @@ assert.deepEqual(tools[0].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
 assert.deepEqual(tools[1].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
 assert.deepEqual(tools[0]._meta, {
   ui: { resourceUri: GITHUB_MCP_APP_URI, visibility: ['model'] },
-  'ui/resourceUri': GITHUB_MCP_APP_URI,
+  'openai/outputTemplate': GITHUB_MCP_APP_URI,
 });
 assert.equal(tools[1]._meta, undefined);
 
@@ -62,17 +62,14 @@ assert.equal(resources.length, 1);
 assert.equal(resources[0].uri, GITHUB_MCP_APP_URI);
 assert.equal(resources[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
 
-const resource = readGithubMcpAppResource(
-  GITHUB_MCP_APP_URI,
-  'https://github-mcp.example/',
-);
+const resource = readGithubMcpAppResource(GITHUB_MCP_APP_URI);
 assert.equal(resource.contents[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
 assert.match(resource.contents[0].text, /Purr GitHub Workbench/);
-assert.match(resource.contents[0].text, /@modelcontextprotocol\/ext-apps@1\.7\.2/);
-assert.deepEqual(resource.contents[0]._meta.ui.csp.resourceDomains, [
-  'https://github-mcp.example',
-  'https://cdn.jsdelivr.net',
-]);
+assert.match(resource.contents[0].text, /window\.openai\?\.toolOutput/);
+assert.match(resource.contents[0].text, /openai:set_globals/);
+assert.match(resource.contents[0].text, /ui\/notifications\/tool-result/);
+assert.doesNotMatch(resource.contents[0].text, /cdn\.jsdelivr\.net|@modelcontextprotocol\/ext-apps/);
+assert.equal(resource.contents[0]._meta.ui.csp, undefined);
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 
 console.log('MCP App UI tests passed');
