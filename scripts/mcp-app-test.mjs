@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Script } from 'node:vm';
 import {
   GITHUB_MCP_APP_MIME_TYPE,
   GITHUB_MCP_APP_URI,
@@ -69,6 +70,9 @@ assert.match(resource.contents[0].text, /window\.openai\?\.toolOutput/);
 assert.match(resource.contents[0].text, /openai:set_globals/);
 assert.match(resource.contents[0].text, /ui\/notifications\/tool-result/);
 assert.doesNotMatch(resource.contents[0].text, /cdn\.jsdelivr\.net|@modelcontextprotocol\/ext-apps/);
+const widgetScript = resource.contents[0].text.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
+assert.notEqual(widgetScript, '');
+assert.doesNotThrow(() => new Script(widgetScript));
 assert.equal(resource.contents[0]._meta.ui.csp, undefined);
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 

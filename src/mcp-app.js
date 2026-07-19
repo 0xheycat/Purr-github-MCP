@@ -5,7 +5,7 @@
 // Repository operations, authentication, and write policy remain owned by
 // Purr GitHub MCP; this module only adds resources and structured UI cards.
 
-export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v2.html';
+export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v3.html';
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
@@ -365,7 +365,7 @@ function githubMcpAppHtml() {
 
       function parseText(content) {
         const text = Array.isArray(content)
-          ? content.filter((item) => item?.type === "text").map((item) => item.text || "").join("\n")
+          ? content.filter((item) => item?.type === "text").map((item) => item.text || "").join("\\n")
           : "";
         if (!text) return {};
         try { return JSON.parse(text); } catch { return { text }; }
