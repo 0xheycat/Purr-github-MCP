@@ -8,6 +8,13 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import { extraTools } from './extensions.js';
+import {
+  decorateGithubInitialize,
+  decorateGithubToolResult,
+  decorateGithubTools,
+  listGithubMcpAppResources,
+  readGithubMcpAppResource,
+} from './mcp-app.js';
 
 const VERSION = '1.0.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -48,6 +55,7 @@ const config = {
   githubToken: env('GITHUB_TOKEN'),
   corsOrigin: env('CORS_ORIGIN', '*'),
   githubApiBase: env('GITHUB_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
+  publicBaseUrl: env('PUBLIC_BASE_URL').replace(/\/+$/, ''),
   allowedRepos: splitList(env('ALLOWED_REPOS')),
   protectedBranches: new Set(splitList(env('PROTECTED_BRANCHES', 'main,master,production,staging,release'))),
   branchPrefixes: splitList(env('BRANCH_PREFIXES', 'feat/,fix/,docs/,chore/,refactor/,test/,perf/')),
@@ -1611,13 +1619,14 @@ const tools = [
 ];
 
 function toolDefinitions() {
-  return tools.map(({ name, description, inputSchema, annotations, _meta }) => ({
+  const definitions = tools.map(({ name, description, inputSchema, annotations, _meta }) => ({
     name,
     description,
     inputSchema,
     ...(annotations ? { annotations } : {}),
     ...(_meta ? { _meta } : {}),
   }));
+  return decorateGithubTools(definitions);
 }
 
 async function handleRpc(msg, ctx) {
@@ -1637,15 +1646,26 @@ async function handleRpc(msg, ctx) {
     if (!method) return jsonRpcError(id, -32600, 'Invalid JSON-RPC request. Missing method.');
 
     if (method === 'initialize') {
-      return jsonRpcResult(id, {
+      return jsonRpcResult(id, decorateGithubInitialize({
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: 'purr-github-MCP', version: VERSION },
-      });
+      }));
     }
 
     if (method === 'notifications/initialized') {
       return null;
+    }
+
+    if (method === 'resources/list') {
+      return jsonRpcResult(id, { resources: listGithubMcpAppResources() });
+    }
+
+    if (method === 'resources/read') {
+      const uri = msg?.params?.uri ?? '';
+      const resource = readGithubMcpAppResource(uri, ctx.origin);
+      if (!resource) return jsonRpcError(id, -32002, `Resource not found: ${uri}`);
+      return jsonRpcResult(id, resource);
     }
 
     if (method === 'tools/list') {
@@ -1658,7 +1678,7 @@ async function handleRpc(msg, ctx) {
       const tool = tools.find((item) => item.name === toolName);
       if (!tool) return jsonRpcError(id, -32602, `Unknown tool: ${toolName}`);
       const result = await tool.handler(args, ctx);
-      return jsonRpcResult(id, result);
+      return jsonRpcResult(id, decorateGithubToolResult(toolName, result));
     }
 
     return jsonRpcError(id, -32601, `Method not found: ${method}`);
@@ -1760,7 +1780,11 @@ async function handleRequest(req, res) {
     return sendJson(res, 400, { error: error?.message ?? 'Invalid JSON body.' });
   }
 
-  const ctx = { githubToken: auth.githubToken, caller: auth.caller };
+  const ctx = {
+    githubToken: auth.githubToken,
+    caller: auth.caller,
+    origin: config.publicBaseUrl || `${url.protocol}//${url.host}`,
+  };
   const response = await handleRpc(body, ctx);
   const sessionId = url.searchParams.get('sessionId') || req.headers['mcp-session-id'];
   const session = sessionId ? sessions.get(String(sessionId)) : null;
