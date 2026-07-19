@@ -16,7 +16,7 @@ import {
   readGithubMcpAppResource,
 } from './mcp-app.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.3-file-bridge';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const GITHUB_BLOB_HARD_LIMIT_BYTES = 100_000_000;
 const GITHUB_LARGE_FILE_WARNING_BYTES = 50_000_000;
@@ -430,7 +430,7 @@ function normalizeUploadedArchive(value) {
   if (files.length !== 1) throw new Error('archive_file must contain exactly one ZIP file.');
   const file = files[0];
   if (!file || typeof file !== 'object') throw new Error('archive_file must be a ChatGPT file reference.');
-  const downloadUrl = file.download_url ?? file.url;
+  const downloadUrl = file.download_url ?? file.download_link ?? file.url;
   if (typeof downloadUrl !== 'string' || !downloadUrl) throw new Error('archive_file is missing download_url.');
   const name = typeof file.file_name === 'string' && file.file_name
     ? file.file_name
@@ -1207,14 +1207,8 @@ const tools = [
         repo: { type: 'string' },
         branch: { type: 'string' },
         archive_file: {
-          type: 'object',
-          properties: {
-            file_id: { type: 'string' },
-            download_url: { type: 'string' },
-            file_name: { type: 'string' },
-            mime_type: { type: 'string' },
-          },
-          required: ['file_id', 'download_url'],
+          type: 'string',
+          description: 'One ChatGPT-uploaded ZIP file. The runtime replaces this value with an authorized file reference.',
         },
         commit_message: { type: 'string' },
         expected_head: { type: 'string', description: 'Optional exact branch HEAD required before commit.' },
@@ -1312,19 +1306,48 @@ const tools = [
   },
   {
     name: 'commit_files_from_manifest_url',
-    description: 'Download a JSON manifest of files/source_url entries and commit all blobs in one call.',
+    description: 'Commit all files from either an HTTP(S) JSON manifest or one uploaded ZIP archive in a single Git commit.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['manifest_url'] },
     inputSchema: {
       type: 'object',
       properties: {
         repo: { type: 'string' },
         branch: { type: 'string' },
-        manifest_url: { type: 'string', description: 'HTTP(S) JSON: {"files":[{"path":"...","source_url":"..."}]}' },
+        manifest_url: {
+          description: 'HTTP(S) JSON manifest URL or one uploaded ZIP file.',
+          oneOf: [
+            { type: 'string' },
+            { type: 'object' },
+            { type: 'array' },
+          ],
+        },
+        archive_file: {
+          type: 'object',
+          properties: {
+            file_id: { type: 'string' },
+            download_url: { type: 'string' },
+            file_name: { type: 'string' },
+            mime_type: { type: 'string' },
+          },
+          required: ['file_id', 'download_url'],
+        },
+        expected_head: { type: 'string', description: 'Optional exact branch HEAD required for ZIP mode.' },
+        expected_file_count: { type: 'number', description: 'Optional exact file count required for ZIP mode.' },
         commit_message: { type: 'string' },
       },
       required: ['repo', 'branch', 'manifest_url', 'commit_message'],
     },
     handler: async (args, ctx) => {
+      const uploadedArchive = args.archive_file ?? (typeof args.manifest_url === 'object' ? args.manifest_url : null) ?? (Array.isArray(args.openaiFileIdRefs) ? args.openaiFileIdRefs : null);
+      const hasManifest = typeof args.manifest_url === 'string' && /^https?:\/\//i.test(args.manifest_url);
+      const hasArchive = Boolean(uploadedArchive);
+      if (hasManifest === hasArchive) throw new Error('Provide one HTTP(S) manifest URL or one uploaded ZIP file.');
+      if (hasArchive) {
+        const zipTool = tools.find((tool) => tool.name === 'commit_zip_archive');
+        if (!zipTool) throw new Error('ZIP archive handler is unavailable.');
+        return zipTool.handler({ ...args, archive_file: uploadedArchive }, ctx);
+      }
       const { owner, repo } = validateRepo(args.repo);
       validateBranch(args.branch, { protect: true });
       const manifest = await fetchJsonFromUrl(args.manifest_url);
@@ -1569,6 +1592,7 @@ const tools = [
     name: 'commit_large_file_from_url',
     description: 'Download one large file from source_url server-side, create a Git blob, and commit it to an existing branch. Images are allowed by ALLOW_IMAGES=true; other binary files require ALLOW_BINARY=true.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['source_url'] },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1581,6 +1605,11 @@ const tools = [
       required: ['repo', 'branch', 'path', 'source_url', 'commit_message'],
     },
     handler: async (args, ctx) => {
+      if (args.path === 'ZIP_TREE') {
+        const zipTool = tools.find((tool) => tool.name === 'commit_zip_archive');
+        if (!zipTool) throw new Error('ZIP archive handler is unavailable.');
+        return zipTool.handler({ ...args, archive_file: args.source_url }, ctx);
+      }
       const { owner, repo } = validateRepo(args.repo);
       validateBranch(args.branch, { protect: true });
       const path = validatePath(args.path, { allowBinary: config.allowBinary, allowImages: config.allowImages });
