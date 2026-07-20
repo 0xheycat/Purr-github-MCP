@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { Script } from 'node:vm';
 import {
+  GITHUB_MCP_APP_LEGACY_URIS,
   GITHUB_MCP_APP_MIME_TYPE,
   GITHUB_MCP_APP_URI,
   GITHUB_MCP_OUTPUT_SCHEMA,
@@ -81,11 +82,20 @@ assert.match(resource.contents[0].text, /Purr GitHub Workbench/);
 assert.match(resource.contents[0].text, /window\.openai\?\.toolOutput/);
 assert.match(resource.contents[0].text, /openai:set_globals/);
 assert.match(resource.contents[0].text, /ui\/notifications\/tool-result/);
+assert.match(resource.contents[0].text, /let expanded = false/);
+assert.match(resource.contents[0].text, /Raw payload is rendered on demand\./);
+assert.match(resource.contents[0].text, /content-visibility: auto/);
 assert.doesNotMatch(resource.contents[0].text, /cdn\.jsdelivr\.net|@modelcontextprotocol\/ext-apps/);
 const widgetScript = resource.contents[0].text.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
 assert.notEqual(widgetScript, '');
 assert.doesNotThrow(() => new Script(widgetScript));
 assert.equal(resource.contents[0]._meta.ui.csp, undefined);
+for (const legacyUri of GITHUB_MCP_APP_LEGACY_URIS) {
+  const legacy = readGithubMcpAppResource(legacyUri);
+  assert.equal(legacy.contents[0].uri, legacyUri);
+  assert.equal(legacy.contents[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
+  assert.match(legacy.contents[0].text, /github-workbench-v4/);
+}
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 
 console.log('MCP App UI tests passed');
