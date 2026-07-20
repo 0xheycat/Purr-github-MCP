@@ -1,15 +1,17 @@
 // Purr GitHub MCP App compatibility layer.
 //
-// Adapted from the MIT-licensed MCP App resource and host-context patterns in:
-// https://github.com/Waishnav/devspace
-// Repository operations, authentication, and write policy remain owned by
-// Purr GitHub MCP; this module only adds resources and structured UI cards.
+// The resource binding and host-context pattern is adapted from the
+// MIT-licensed Waishnav/devspace project: https://github.com/Waishnav/devspace
+// The compact workbench keeps repository operations, authentication, and write
+// policy server-side. It only adds a self-contained MCP App resource and a
+// stable structured card contract for ChatGPT and other MCP App hosts.
 
-export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v4.html';
+export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v7.html';
 export const GITHUB_MCP_APP_LEGACY_URIS = Object.freeze([
   'ui://purr/github-workbench.html',
   'ui://purr/github-workbench-v2.html',
   'ui://purr/github-workbench-v3.html',
+  'ui://purr/github-workbench-v4.html',
 ]);
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 
@@ -17,6 +19,7 @@ const GITHUB_MCP_APP_READABLE_URIS = new Set([
   GITHUB_MCP_APP_URI,
   ...GITHUB_MCP_APP_LEGACY_URIS,
 ]);
+
 export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
   additionalProperties: false,
@@ -106,7 +109,7 @@ export function listGithubMcpAppResources() {
       name: 'purr-github-workbench',
       title: 'Purr GitHub Workbench',
       description:
-        'Interactive repository, tree, file, diff, commit, issue, and pull request cards for Purr GitHub MCP.',
+        'Compact repository, branch, file, diff, commit, issue, pull request, upload, and verification cards.',
       mimeType: GITHUB_MCP_APP_MIME_TYPE,
     },
   ];
@@ -122,7 +125,7 @@ export function readGithubMcpAppResource(uri) {
         text: githubMcpAppHtml(),
         _meta: {
           ui: {
-            prefersBorder: true,
+            prefersBorder: false,
           },
         },
       },
@@ -139,7 +142,7 @@ function extractPayload(result) {
   if (!Array.isArray(result.content)) return result;
   const text = result.content
     .filter((entry) => entry && typeof entry === 'object' && entry.type === 'text')
-    .map((entry) => typeof entry.text === 'string' ? entry.text : '')
+    .map((entry) => (typeof entry.text === 'string' ? entry.text : ''))
     .filter(Boolean)
     .join('\n');
   if (!text) return result;
@@ -154,12 +157,12 @@ function inferStatus(tool, payload, isError) {
   if (isError) return 'failed';
   const explicit = findString(payload, ['status', 'state', 'mergeable_state']);
   if (explicit) return explicit;
-  if (/create|commit|update|delete|merge|comment|apply/i.test(tool)) return 'completed';
+  if (/create|commit|update|delete|merge|comment|apply|upload/i.test(tool)) return 'completed';
   return 'ready';
 }
 
 function findString(value, keys, depth = 0) {
-  if (depth > 4 || !value || typeof value !== 'object') return undefined;
+  if (depth > 3 || !value || typeof value !== 'object') return undefined;
   for (const key of keys) {
     if (typeof value[key] === 'string' && value[key]) return value[key];
   }
@@ -182,106 +185,121 @@ function githubMcpAppHtml() {
       :root {
         color-scheme: light dark;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        --card: color-mix(in srgb, Canvas 95%, CanvasText 5%);
-        --border: color-mix(in srgb, CanvasText 16%, transparent);
-        --muted: color-mix(in srgb, CanvasText 62%, transparent);
-        --soft: color-mix(in srgb, CanvasText 7%, transparent);
+        --surface: color-mix(in srgb, Canvas 97%, CanvasText 3%);
+        --border: color-mix(in srgb, CanvasText 15%, transparent);
+        --line: color-mix(in srgb, CanvasText 9%, transparent);
+        --muted: color-mix(in srgb, CanvasText 58%, transparent);
+        --subtle: color-mix(in srgb, CanvasText 5%, transparent);
         --ok: #22c55e;
-        --warn: #f59e0b;
+        --run: #f59e0b;
         --bad: #ef4444;
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; min-height: 100%; background: transparent; color: CanvasText; }
-      body { padding: 8px; }
-      button { font: inherit; color: inherit; }
+      body { padding: 4px; }
+      button, summary { color: inherit; font: inherit; }
       .shell { width: 100%; }
       .card {
         overflow: hidden;
         border: 1px solid var(--border);
-        border-radius: 14px;
-        background: var(--card);
+        border-radius: 11px;
+        background: var(--surface);
         contain: layout paint style;
         content-visibility: auto;
-        contain-intrinsic-size: 72px;
+        contain-intrinsic-size: 58px;
       }
       .header {
         width: 100%;
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-columns: 20px minmax(0, 1fr) auto 14px;
         align-items: center;
-        gap: 10px;
+        gap: 9px;
         border: 0;
+        padding: 10px 12px;
         background: transparent;
-        padding: 13px 14px;
         text-align: left;
         cursor: pointer;
       }
-      .icon {
-        width: 30px;
-        height: 30px;
-        border-radius: 9px;
-        display: grid;
-        place-items: center;
-        background: var(--soft);
-        font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      .mark {
+        color: var(--muted);
+        font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        text-align: center;
       }
       .main { min-width: 0; }
-      .title { display: block; font-weight: 650; line-height: 1.25; }
+      .title { display: block; font-size: 13px; font-weight: 650; line-height: 1.3; }
       .label {
         display: block;
-        margin-top: 3px;
-        color: var(--muted);
-        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        margin-top: 2px;
         overflow: hidden;
+        color: var(--muted);
+        font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .status {
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 4px 8px;
+      .state {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
         font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        text-transform: lowercase;
+        white-space: nowrap;
       }
-      .status.ok { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
-      .status.running { border-color: color-mix(in srgb, var(--warn) 60%, var(--border)); }
-      .status.failed { border-color: color-mix(in srgb, var(--bad) 60%, var(--border)); }
-      .body { border-top: 1px solid var(--border); padding: 12px 14px 14px; }
-      .actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-      .details-toggle {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 6px 9px;
-        background: transparent;
-        cursor: pointer;
-        font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+      .state.running .dot { background: var(--run); }
+      .state.failed .dot { background: var(--bad); }
+      .chevron { color: var(--muted); font-size: 11px; transition: transform 120ms ease; }
+      .header[aria-expanded="true"] .chevron { transform: rotate(180deg); }
+      .body { border-top: 1px solid var(--line); padding: 11px 12px 12px; }
+      .summary { margin: 0 0 9px; font-size: 13px; line-height: 1.45; }
+      .rows { margin: 0; }
+      .row {
+        display: grid;
+        grid-template-columns: minmax(88px, 118px) minmax(0, 1fr);
+        gap: 12px;
+        padding: 6px 0;
+        border-bottom: 1px solid var(--line);
       }
-      .hint { color: var(--muted); font-size: 11px; }
-      .metrics { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
-      .metric {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 5px 7px;
-        background: var(--soft);
-        font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-      pre {
-        max-height: 380px;
-        overflow: auto;
+      .row:last-child { border-bottom: 0; }
+      dt { color: var(--muted); font-size: 11px; }
+      dd {
+        min-width: 0;
         margin: 0;
-        padding: 11px;
-        border-radius: 9px;
-        background: color-mix(in srgb, CanvasText 6%, transparent);
-        font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+        font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .items { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+      .item {
+        padding: 7px 8px;
+        border-radius: 7px;
+        background: var(--subtle);
+        font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow-wrap: anywhere;
+      }
+      .console {
+        max-height: 300px;
+        overflow: auto;
+        margin: 8px 0 0;
+        padding: 9px 10px;
+        border-radius: 7px;
+        background: color-mix(in srgb, CanvasText 7%, transparent);
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
+      .raw { margin-top: 9px; border-top: 1px solid var(--line); padding-top: 8px; }
+      .raw > summary {
+        width: fit-content;
+        color: var(--muted);
+        cursor: pointer;
+        font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
       .empty {
         border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 14px;
+        border-radius: 10px;
+        padding: 12px;
         color: var(--muted);
-        background: var(--card);
+        background: var(--surface);
+        font-size: 12px;
       }
     </style>
   </head>
@@ -290,11 +308,7 @@ function githubMcpAppHtml() {
     <script>
       const root = document.querySelector("#app");
       let expanded = false;
-      let detailsOpen = false;
-      let card = normalizeResult(
-        window.openai?.toolOutput,
-        window.openai?.toolResponseMetadata
-      );
+      let card = normalizeResult(window.openai?.toolOutput, window.openai?.toolResponseMetadata);
 
       applyHostGlobals(window.openai || {});
       render();
@@ -302,10 +316,15 @@ function githubMcpAppHtml() {
       window.addEventListener("openai:set_globals", (event) => {
         const globals = event.detail?.globals || {};
         applyHostGlobals(globals);
-        const output = globals.toolOutput ?? window.openai?.toolOutput;
-        const metadata = globals.toolResponseMetadata ?? window.openai?.toolResponseMetadata;
-        const next = normalizeResult(output, metadata);
-        if (next) card = next;
+        const next = normalizeResult(
+          globals.toolOutput ?? window.openai?.toolOutput,
+          globals.toolResponseMetadata ?? window.openai?.toolResponseMetadata
+        );
+        if (next) {
+          const changed = !card || next.tool !== card.tool;
+          card = next;
+          if (changed) expanded = false;
+        }
         render();
       }, { passive: true });
 
@@ -315,7 +334,11 @@ function githubMcpAppHtml() {
         if (!message || message.jsonrpc !== "2.0") return;
         if (message.method !== "ui/notifications/tool-result") return;
         const next = normalizeResult(message.params);
-        if (next) card = next;
+        if (next) {
+          const changed = !card || next.tool !== card.tool;
+          card = next;
+          if (changed) expanded = false;
+        }
         render();
       }, { passive: true });
 
@@ -327,7 +350,7 @@ function githubMcpAppHtml() {
         const meta = full._meta || metadata || {};
         return {
           kind: "purr-github-card",
-          tool: meta.tool || "github",
+          tool: meta.tool || meta.card?.tool || "github",
           status: full.isError ? "failed" : "ready",
           isError: Boolean(full.isError),
           payload: structured ?? parseText(full.content)
@@ -354,47 +377,52 @@ function githubMcpAppHtml() {
           root.replaceChildren(node("section", "empty", "Waiting for a tool result."));
           return;
         }
-
         const display = displayFor(card.tool, card.payload);
         const section = node("section", "card");
         const header = node("button", "header");
         header.type = "button";
         header.setAttribute("aria-expanded", String(expanded));
-        header.addEventListener("click", () => {
-          expanded = !expanded;
-          if (!expanded) detailsOpen = false;
-          render();
-        });
-        const icon = node("span", "icon", display.icon);
+        header.addEventListener("click", () => { expanded = !expanded; render(); });
+        header.append(node("span", "mark", display.icon));
         const main = node("span", "main");
         main.append(node("span", "title", display.title));
         if (display.label) main.append(node("span", "label", display.label));
-        header.append(icon, main, node("span", "status " + tone(card.status, card.isError), card.status || "ready"));
+        header.append(main);
+        const tone = statusTone(card.status, card.isError);
+        const state = node("span", "state " + tone);
+        state.append(node("span", "dot"), node("span", "", normalizedStatus(card.status, card.isError)));
+        header.append(state, node("span", "chevron", "⌄"));
         section.append(header);
-
-        if (expanded) {
-          const body = node("div", "body");
-          const metrics = metricValues(card.payload);
-          if (metrics.length) {
-            const row = node("div", "metrics");
-            for (const metric of metrics) row.append(node("span", "metric", metric));
-            body.append(row);
-          }
-          const actions = node("div", "actions");
-          const details = node("button", "details-toggle", detailsOpen ? "Hide details" : "Show details");
-          details.type = "button";
-          details.setAttribute("aria-expanded", String(detailsOpen));
-          details.addEventListener("click", (event) => {
-            event.stopPropagation();
-            detailsOpen = !detailsOpen;
-            render();
-          });
-          actions.append(details, node("span", "hint", "Raw payload is rendered on demand."));
-          body.append(actions);
-          if (detailsOpen) body.append(node("pre", "", pretty(card.payload)));
-          section.append(body);
-        }
+        if (expanded) section.append(renderBody(card.tool, card.payload));
         root.replaceChildren(section);
+      }
+
+      function renderBody(tool, payload) {
+        const body = node("div", "body");
+        const view = presentationFor(tool, payload);
+        if (view.summary) body.append(node("p", "summary", view.summary));
+        if (view.rows?.length) {
+          const rows = node("dl", "rows");
+          for (const item of view.rows) {
+            const row = node("div", "row");
+            row.append(node("dt", "", item[0]), node("dd", "", item[1]));
+            rows.append(row);
+          }
+          body.append(rows);
+        }
+        if (view.items?.length) {
+          const list = node("ul", "items");
+          for (const item of view.items) list.append(node("li", "item", item));
+          body.append(list);
+        }
+        if (view.console) body.append(node("pre", "console", view.console));
+        const raw = node("details", "raw");
+        raw.append(node("summary", "", "Raw"));
+        raw.addEventListener("toggle", () => {
+          if (raw.open && raw.children.length === 1) raw.append(node("pre", "console", pretty(payload)));
+        });
+        body.append(raw);
+        return body;
       }
 
       function parseText(content) {
@@ -406,68 +434,326 @@ function githubMcpAppHtml() {
       }
 
       function displayFor(tool, payload) {
-        let icon = "GH";
-        let title = String(tool || "GitHub").replaceAll("_", " ");
-        if (tool === "read_operating_guide") { icon = "?"; title = "Operating guide"; }
-        else if (tool === "verify_mcp_deploy") { icon = "✓"; title = "MCP deployment verification"; }
-        else if (/pull_request|pr$/i.test(tool)) { icon = "PR"; title = title.replaceAll("pull request", "PR"); }
-        else if (/commit|patch|file/i.test(tool)) icon = "Δ";
-        else if (/branch|ref/i.test(tool)) icon = "⑂";
-        else if (/issue|comment/i.test(tool)) icon = "#";
-        else if (/repository|directory|tree/i.test(tool)) icon = "R";
-        else if (/search/i.test(tool)) icon = "?";
-        return { icon, title: sentence(title), label: findLabel(payload) };
+        const labels = {
+          read_operating_guide: ["?", "Operating guide"],
+          get_authenticated_user: ["A", "GitHub identity"],
+          get_repository: ["R", "Repository"],
+          create_repository: ["R+", "Repository created"],
+          list_branches: ["⑂", "Branches"],
+          create_branch: ["⑂", "Branch created"],
+          list_tree: ["T", "Repository tree"],
+          list_directory: ["D", "Directory"],
+          get_file: ["F", "File"],
+          get_files_batch: ["F", "Files"],
+          list_commits: ["C", "Commits"],
+          get_commit: ["C", "Commit"],
+          compare_refs: ["Δ", "Reference comparison"],
+          compare_and_verify_pr: ["Δ", "PR comparison"],
+          list_issues: ["#", "Issues"],
+          create_issue: ["#+", "Issue created"],
+          list_pull_requests: ["PR", "Pull requests"],
+          list_pull_request_files: ["PR", "Pull request files"],
+          create_pull_request: ["PR", "Pull request created"],
+          update_pull_request: ["PR", "Pull request updated"],
+          merge_pull_request: ["PR", "Pull request merge"],
+          comment_pull_request: ["PR", "Pull request comment"],
+          create_verification_comment: ["✓", "Verification comment"],
+          get_verification_plan: ["✓", "Verification plan"],
+          verify_mcp_deploy: ["✓", "MCP deployment verification"],
+          search_code: ["?", "Code search"],
+          update_file: ["F", "File updated"],
+          delete_file: ["F", "File deleted"],
+          commit_small_text_files: ["C", "Commit created"],
+          commit_files: ["C", "Commit created"],
+          create_branch_and_commit: ["C", "Branch and commit created"],
+          create_branch_commit_pr: ["PR", "Branch, commit, and PR created"],
+          apply_unified_diff: ["Δ", "Patch committed"],
+          commit_large_file_from_url: ["↑", "Large file committed"],
+          commit_files_from_manifest_url: ["↑", "Manifest committed"],
+          commit_zip_archive: ["↑", "Archive committed"]
+        };
+        const item = labels[tool] || ["GH", sentence(String(tool || "GitHub").replaceAll("_", " "))];
+        return { icon: item[0], title: item[1], label: primaryLabel(tool, payload) };
+      }
+
+      function presentationFor(tool, payload) {
+        if (/repository/i.test(tool)) return repositoryView(payload);
+        if (/pull_request|_pr$/i.test(tool)) return pullRequestView(tool, payload);
+        if (/compare/i.test(tool)) return compareView(payload);
+        if (/commit|apply_unified_diff|update_file|delete_file|archive|manifest|large_file/i.test(tool)) return commitView(tool, payload);
+        if (/branch/i.test(tool)) return branchView(payload);
+        if (/tree|directory|files_batch|get_file/i.test(tool)) return fileView(tool, payload);
+        if (/issue/i.test(tool)) return issueView(payload);
+        if (/verification|verify_mcp/i.test(tool)) return verificationView(payload);
+        const message = first(payload, ["message", "error", "warning"]);
+        return {
+          summary: message ? truncate(message, 700) : conciseSummary(payload),
+          rows: rowsFor(payload, [
+            ["Status", ["status", "state"]],
+            ["Repository", ["repo", "full_name"]],
+            ["Branch", ["branch", "ref"]],
+            ["Path", ["path"]],
+            ["SHA", ["sha", "commitSha"]]
+          ]),
+          console: typeof direct(payload, "text") === "string" ? truncate(direct(payload, "text"), 24000) : undefined
+        };
+      }
+
+      function repositoryView(payload) {
+        const name = first(payload, ["full_name", "repo", "name"]);
+        const visibility = first(payload, ["private"]);
+        const branch = first(payload, ["default_branch", "branch"]);
+        return {
+          summary: name ? String(name) + (branch ? " · " + String(branch) : "") : conciseSummary(payload),
+          rows: compactRows([
+            ["Repository", name],
+            ["Visibility", visibility === true ? "private" : visibility === false ? "public" : undefined],
+            ["Default branch", branch],
+            ["Open issues", first(payload, ["open_issues_count"])],
+            ["Stars", first(payload, ["stargazers_count"])],
+            ["URL", first(payload, ["html_url"])]
+          ])
+        };
+      }
+
+      function pullRequestView(tool, payload) {
+        const pr = objectAt(payload, ["pull_request"]) || payload;
+        const number = first(pr, ["number"]);
+        const title = first(pr, ["title"]);
+        const state = first(pr, ["state", "status"]);
+        const head = first(pr, ["head", "branch"]);
+        const base = first(pr, ["base"]);
+        const summary = number !== undefined
+          ? "#" + String(number) + (title ? " · " + String(title) : "")
+          : conciseSummary(payload);
+        return {
+          summary,
+          rows: compactRows([
+            ["State", state],
+            ["Head", head],
+            ["Base", base],
+            ["Draft", first(pr, ["draft"])],
+            ["Merged", first(pr, ["merged"])],
+            ["SHA", first(pr, ["sha", "commitSha"])],
+            ["URL", first(pr, ["html_url"])]
+          ]),
+          items: tool === "list_pull_requests" ? arrayAt(payload).slice(0, 10).map(prLine) : undefined
+        };
+      }
+
+      function compareView(payload) {
+        return {
+          summary: first(payload, ["status"]) ? "Comparison status: " + String(first(payload, ["status"])) + "." : conciseSummary(payload),
+          rows: compactRows([
+            ["Base", first(payload, ["base"])],
+            ["Head", first(payload, ["head"])],
+            ["Ahead", first(payload, ["ahead_by"])],
+            ["Behind", first(payload, ["behind_by"])],
+            ["Changed files", countAt(payload, ["files", "changed_files"])],
+            ["Commits", countAt(payload, ["commits"])]
+          ]),
+          items: arrayNamed(payload, "files").slice(0, 10).map(fileLine)
+        };
+      }
+
+      function commitView(tool, payload) {
+        const files = arrayNamed(payload, "files_committed").length
+          ? arrayNamed(payload, "files_committed")
+          : arrayNamed(payload, "files_changed");
+        const sha = first(payload, ["commitSha", "commit", "sha"]);
+        return {
+          summary: /delete/i.test(tool) ? "Repository file deletion recorded." : /upload|archive|manifest|large_file/i.test(tool) ? "Repository upload recorded." : "Repository change recorded.",
+          rows: compactRows([
+            ["Repository", first(payload, ["repo", "full_name"])],
+            ["Branch", first(payload, ["branch", "new_branch"])],
+            ["Commit", sha],
+            ["Files", files.length ? String(files.length) : countAt(payload, ["files"])],
+            ["Bytes", first(payload, ["bytes"])],
+            ["URL", first(payload, ["commitUrl", "html_url"])]
+          ]),
+          items: files.slice(0, 10).map((item) => typeof item === "string" ? item : fileLine(item))
+        };
+      }
+
+      function branchView(payload) {
+        const branches = arrayAt(payload);
+        return {
+          summary: branches.length ? String(branches.length) + " branches." : "Branch operation completed.",
+          rows: compactRows([
+            ["Repository", first(payload, ["repo"])],
+            ["Base", first(payload, ["base_branch", "base"])],
+            ["Branch", first(payload, ["new_branch", "branch"])],
+            ["SHA", first(payload, ["sha"])]
+          ]),
+          items: branches.slice(0, 12).map(branchLine)
+        };
+      }
+
+      function fileView(tool, payload) {
+        const entries = arrayAt(payload).length ? arrayAt(payload) : arrayNamed(payload, "files");
+        const content = first(payload, ["content", "text"]);
+        return {
+          summary: entries.length ? String(entries.length) + " repository entries." : first(payload, ["path"]) ? String(first(payload, ["path"])) : conciseSummary(payload),
+          rows: compactRows([
+            ["Repository", first(payload, ["repo"])],
+            ["Ref", first(payload, ["ref", "branch"])],
+            ["Path", first(payload, ["path"])],
+            ["SHA", first(payload, ["sha"])],
+            ["Size", first(payload, ["size"])]
+          ]),
+          items: entries.slice(0, 12).map(fileLine),
+          console: /get_file/i.test(tool) && typeof content === "string" ? truncate(content, 24000) : undefined
+        };
+      }
+
+      function issueView(payload) {
+        const issues = arrayAt(payload);
+        return {
+          summary: issues.length ? String(issues.length) + " issues." : first(payload, ["number"]) !== undefined ? "Issue #" + String(first(payload, ["number"])) + "." : conciseSummary(payload),
+          rows: compactRows([
+            ["Number", first(payload, ["number"])],
+            ["Title", first(payload, ["title"])],
+            ["State", first(payload, ["state"])],
+            ["URL", first(payload, ["html_url"])]
+          ]),
+          items: issues.slice(0, 10).map(issueLine)
+        };
+      }
+
+      function verificationView(payload) {
+        return {
+          summary: first(payload, ["annotations_ok"]) === true ? "MCP catalog and annotations verified." : first(payload, ["notes", "message"]) || conciseSummary(payload),
+          rows: compactRows([
+            ["Repository", first(payload, ["repo"])],
+            ["Ref", first(payload, ["ref"])],
+            ["Package manager", first(payload, ["package_manager"])],
+            ["Tools", first(payload, ["count"])],
+            ["Annotations", first(payload, ["annotations_ok"])],
+            ["URL", first(payload, ["url"])]
+          ]),
+          items: arrayNamed(payload, "recommended_commands").slice(0, 10).map(String)
+        };
+      }
+
+      function primaryLabel(tool, payload) {
+        if (/pull_request|_pr$/i.test(tool) && first(payload, ["number"]) !== undefined) return "#" + String(first(payload, ["number"]));
+        return first(payload, ["repo", "full_name", "path", "branch", "new_branch", "ref", "sha", "title", "html_url"]);
+      }
+
+      function rowsFor(payload, definitions) {
+        return compactRows(definitions.map((definition) => [definition[0], first(payload, definition[1])]));
+      }
+
+      function compactRows(rows) {
+        return rows
+          .filter((row) => row[1] !== undefined && row[1] !== null && String(row[1]) !== "")
+          .map((row) => [String(row[0]), truncate(String(row[1]), 1000)]);
+      }
+
+      function first(value, keys, depth = 0, state = { nodes: 0, seen: new WeakSet() }) {
+        if (depth > 3 || state.nodes > 240 || !value || typeof value !== "object") return undefined;
+        if (state.seen.has(value)) return undefined;
+        state.seen.add(value);
+        for (const key of keys) {
+          if (["string", "number", "boolean"].includes(typeof value[key]) && String(value[key]) !== "") return value[key];
+        }
+        const preferred = ["data", "repository", "pull_request", "commit", "result", "tools_list", "initialize"];
+        for (const key of preferred) {
+          if (value[key] && typeof value[key] === "object") {
+            state.nodes += 1;
+            const found = first(value[key], keys, depth + 1, state);
+            if (found !== undefined) return found;
+          }
+        }
+        return undefined;
+      }
+
+      function direct(value, key) {
+        return value && typeof value === "object" ? value[key] : undefined;
+      }
+
+      function objectAt(value, keys) {
+        if (!value || typeof value !== "object") return null;
+        for (const key of keys) {
+          const child = value[key];
+          if (child && typeof child === "object" && !Array.isArray(child)) return child;
+        }
+        return null;
+      }
+
+      function arrayAt(value) {
+        if (Array.isArray(value)) return value;
+        if (!value || typeof value !== "object") return [];
+        for (const key of ["items", "tree", "branches", "commits", "issues", "pull_requests", "results"]) {
+          if (Array.isArray(value[key])) return value[key];
+        }
+        return [];
+      }
+
+      function arrayNamed(value, key) {
+        if (!value || typeof value !== "object") return [];
+        return Array.isArray(value[key]) ? value[key] : [];
+      }
+
+      function countAt(value, keys) {
+        for (const key of keys) {
+          if (value && typeof value === "object") {
+            if (Array.isArray(value[key])) return String(value[key].length);
+            if (["number", "string"].includes(typeof value[key])) return String(value[key]);
+          }
+        }
+        return undefined;
+      }
+
+      function branchLine(value) {
+        if (!value || typeof value !== "object") return truncate(String(value), 500);
+        return String(value.name || value.branch || "branch") + (value.sha ? " · " + String(value.sha).slice(0, 12) : "") + (value.protected ? " · protected" : "");
+      }
+
+      function fileLine(value) {
+        if (!value || typeof value !== "object") return truncate(String(value), 500);
+        const path = value.path || value.filename || value.name || "file";
+        const suffix = value.status || value.type || value.sha;
+        return String(path) + (suffix ? " · " + truncate(String(suffix), 120) : "");
+      }
+
+      function prLine(value) {
+        if (!value || typeof value !== "object") return truncate(String(value), 500);
+        return "#" + String(value.number ?? "?") + " · " + String(value.title || "Pull request") + (value.state ? " · " + String(value.state) : "");
+      }
+
+      function issueLine(value) {
+        if (!value || typeof value !== "object") return truncate(String(value), 500);
+        return "#" + String(value.number ?? "?") + " · " + String(value.title || "Issue") + (value.state ? " · " + String(value.state) : "");
+      }
+
+      function conciseSummary(payload) {
+        if (Array.isArray(payload)) return String(payload.length) + " results.";
+        if (!payload || typeof payload !== "object") return truncate(String(payload ?? "Completed."), 700);
+        const message = first(payload, ["message", "error", "warning"]);
+        if (message) return truncate(String(message), 700);
+        const status = first(payload, ["status", "state"]);
+        return status ? "Result status: " + String(status) + "." : "Operation completed.";
+      }
+
+      function normalizedStatus(status, isError) {
+        if (isError) return "failed";
+        const value = String(status || "ready").toLowerCase();
+        if (/success|complete|completed|ok|healthy|merged/.test(value)) return "ready";
+        if (/manual/.test(value)) return "manual required";
+        if (/approval/.test(value)) return "approval required";
+        return truncate(value, 22);
+      }
+
+      function statusTone(status, isError) {
+        if (isError || /fail|error|cancel|reject|conflict|unavailable/i.test(String(status))) return "failed";
+        if (/run|queue|pending|progress|draft|approval|manual|unknown/i.test(String(status))) return "running";
+        return "ok";
       }
 
       function sentence(value) {
-        const normalized = String(value).trim();
-        return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : "GitHub";
-      }
-
-      function findLabel(payload) {
-        return deepValues(payload, ["repo", "full_name", "path", "branch", "ref", "sha", "html_url", "title"])[0];
-      }
-
-      function metricValues(payload) {
-        const keys = ["number", "state", "status", "sha", "branch", "ref", "additions", "deletions", "changed_files", "files_committed", "total_count"];
-        const output = [];
-        const seen = new Set();
-        walk(payload, 0, (key, value) => {
-          if (!keys.includes(key) || seen.has(key)) return;
-          if (["string", "number", "boolean"].includes(typeof value)) {
-            seen.add(key);
-            output.push(key + ": " + String(value));
-          }
-        });
-        return output.slice(0, 8);
-      }
-
-      function deepValues(payload, keys) {
-        const output = [];
-        walk(payload, 0, (key, value) => {
-          if (keys.includes(key) && typeof value === "string" && value && !output.includes(value)) output.push(value);
-        });
-        return output;
-      }
-
-      function walk(value, depth, visit, state = { nodes: 0, seen: new WeakSet() }) {
-        if (depth > 3 || state.nodes >= 400 || !value || typeof value !== "object") return;
-        if (state.seen.has(value)) return;
-        state.seen.add(value);
-        for (const key in value) {
-          if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
-          if (state.nodes >= 400) break;
-          const child = value[key];
-          state.nodes += 1;
-          visit(key, child);
-          if (child && typeof child === "object") walk(child, depth + 1, visit, state);
-        }
-      }
-
-      function tone(status, isError) {
-        if (isError || /fail|error|closed|conflict|reject/i.test(String(status))) return "failed";
-        if (/pending|queued|running|draft|unknown/i.test(String(status))) return "running";
-        return "ok";
+        const text = String(value || "").trim();
+        return text ? text[0].toUpperCase() + text.slice(1) : "Purr GitHub";
       }
 
       function pretty(value) {
@@ -488,7 +774,7 @@ function githubMcpAppHtml() {
             state.nodes += 1;
             output.push(boundedPreview(value[index], depth + 1, state));
           }
-          if (value.length > limit) output.push("[" + (value.length - limit) + " more items]");
+          if (value.length > limit) output.push("[" + String(value.length - limit) + " more items]");
           return output;
         }
         const output = {};
@@ -507,7 +793,8 @@ function githubMcpAppHtml() {
       }
 
       function truncate(value, limit) {
-        return value.length > limit ? value.slice(0, limit) + "\\n[Preview truncated]" : value;
+        const text = String(value ?? "");
+        return text.length > limit ? text.slice(0, limit) + "\\n[truncated]" : text;
       }
 
       function node(tag, className = "", text) {
