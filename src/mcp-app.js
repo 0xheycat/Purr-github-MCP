@@ -20,13 +20,8 @@ export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   },
 });
 
-const EXCLUDED_TOOLS = new Set([
-  'read_operating_guide',
-  'verify_mcp_deploy',
-]);
-
 export function githubMcpAppToolMeta(toolName) {
-  if (!toolName || EXCLUDED_TOOLS.has(toolName)) return undefined;
+  if (!toolName) return undefined;
   return {
     ui: {
       resourceUri: GITHUB_MCP_APP_URI,
@@ -374,7 +369,9 @@ function githubMcpAppHtml() {
       function displayFor(tool, payload) {
         let icon = "GH";
         let title = String(tool || "GitHub").replaceAll("_", " ");
-        if (/pull_request|pr$/i.test(tool)) { icon = "PR"; title = title.replaceAll("pull request", "PR"); }
+        if (tool === "read_operating_guide") { icon = "?"; title = "Operating guide"; }
+        else if (tool === "verify_mcp_deploy") { icon = "✓"; title = "MCP deployment verification"; }
+        else if (/pull_request|pr$/i.test(tool)) { icon = "PR"; title = title.replaceAll("pull request", "PR"); }
         else if (/commit|patch|file/i.test(tool)) icon = "Δ";
         else if (/branch|ref/i.test(tool)) icon = "⑂";
         else if (/issue|comment/i.test(tool)) icon = "#";
