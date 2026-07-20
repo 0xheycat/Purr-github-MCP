@@ -83,18 +83,22 @@ assert.match(resource.contents[0].text, /window\.openai\?\.toolOutput/);
 assert.match(resource.contents[0].text, /openai:set_globals/);
 assert.match(resource.contents[0].text, /ui\/notifications\/tool-result/);
 assert.match(resource.contents[0].text, /let expanded = false/);
-assert.match(resource.contents[0].text, /Raw payload is rendered on demand\./);
+assert.match(resource.contents[0].text, /github-workbench-v7/);
+assert.match(resource.contents[0].text, /Reference comparison/);
+assert.match(resource.contents[0].text, /raw\.addEventListener\("toggle"/);
 assert.match(resource.contents[0].text, /content-visibility: auto/);
+assert.doesNotMatch(resource.contents[0].text, /Raw payload is rendered on demand\./);
 assert.doesNotMatch(resource.contents[0].text, /cdn\.jsdelivr\.net|@modelcontextprotocol\/ext-apps/);
 const widgetScript = resource.contents[0].text.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
 assert.notEqual(widgetScript, '');
 assert.doesNotThrow(() => new Script(widgetScript));
+assert.equal(resource.contents[0]._meta.ui.prefersBorder, false);
 assert.equal(resource.contents[0]._meta.ui.csp, undefined);
 for (const legacyUri of GITHUB_MCP_APP_LEGACY_URIS) {
   const legacy = readGithubMcpAppResource(legacyUri);
   assert.equal(legacy.contents[0].uri, legacyUri);
   assert.equal(legacy.contents[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
-  assert.match(legacy.contents[0].text, /github-workbench-v4/);
+  assert.match(legacy.contents[0].text, /github-workbench-v7/);
 }
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 
