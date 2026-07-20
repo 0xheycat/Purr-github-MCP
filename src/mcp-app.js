@@ -1,5 +1,7 @@
 // Purr GitHub MCP App compatibility layer.
 //
+// The resource binding and host-context pattern is adapted from the
+// MIT-licensed Waishnav/devspace project: https://github.com/Waishnav/devspace
 // The compact workbench keeps repository operations, authentication, and write
 // policy server-side. It only adds a self-contained MCP App resource and a
 // stable structured card contract for ChatGPT and other MCP App hosts.
