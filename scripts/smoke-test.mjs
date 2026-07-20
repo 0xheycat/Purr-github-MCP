@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { GITHUB_MCP_APP_MIME_TYPE, GITHUB_MCP_APP_URI } from '../src/mcp-app.js';
+import {
+  GITHUB_MCP_APP_LEGACY_URIS,
+  GITHUB_MCP_APP_MIME_TYPE,
+  GITHUB_MCP_APP_URI,
+} from '../src/mcp-app.js';
 
 const port = 3999;
 const githubPort = 4099;
@@ -168,7 +172,7 @@ try {
     }
     templateUris.add(template);
   }
-  for (const uri of templateUris) {
+  for (const uri of [...templateUris, ...GITHUB_MCP_APP_LEGACY_URIS]) {
     const read = await request('/mcp', {
       jsonrpc: '2.0',
       id: `resource:${uri}`,
