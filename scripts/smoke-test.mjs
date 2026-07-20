@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { GITHUB_MCP_APP_MIME_TYPE, GITHUB_MCP_APP_URI } from '../src/mcp-app.js';
 
 const port = 3999;
 const githubPort = 4099;
@@ -157,6 +158,27 @@ try {
   const tools = list.result?.tools ?? [];
   if (!Array.isArray(tools) || tools.length < 18) {
     throw new Error(`Unexpected tools/list result: ${JSON.stringify(list)}`);
+  }
+  const templateUris = new Set();
+  for (const tool of tools) {
+    const template = tool?._meta?.['openai/outputTemplate'];
+    const resourceUri = tool?._meta?.ui?.resourceUri;
+    if (template !== GITHUB_MCP_APP_URI || resourceUri !== GITHUB_MCP_APP_URI) {
+      throw new Error(`Tool is missing the GitHub workbench template: ${JSON.stringify(tool)}`);
+    }
+    templateUris.add(template);
+  }
+  for (const uri of templateUris) {
+    const read = await request('/mcp', {
+      jsonrpc: '2.0',
+      id: `resource:${uri}`,
+      method: 'resources/read',
+      params: { uri },
+    });
+    const content = read.result?.contents?.[0];
+    if (content?.uri !== uri || content?.mimeType !== GITHUB_MCP_APP_MIME_TYPE) {
+      throw new Error(`Unexpected resources/read result: ${JSON.stringify(read)}`);
+    }
   }
   const getFile = tools.find((tool) => tool.name === 'get_file');
   const deleteFile = tools.find((tool) => tool.name === 'delete_file');
