@@ -3,6 +3,7 @@ import { Script } from 'node:vm';
 import {
   GITHUB_MCP_APP_LEGACY_URIS,
   GITHUB_MCP_APP_MIME_TYPE,
+  GITHUB_MCP_APP_TOOL_NAMES,
   GITHUB_MCP_APP_URI,
   GITHUB_MCP_OUTPUT_SCHEMA,
   decorateGithubInitialize,
@@ -24,26 +25,22 @@ assert.deepEqual(initialized.capabilities, {
 const tools = decorateGithubTools([
   { name: 'get_repository', inputSchema: { type: 'object' } },
   { name: 'read_operating_guide', inputSchema: { type: 'object' } },
-  { name: 'verify_mcp_deploy', inputSchema: { type: 'object' } },
+  { name: 'get_verification_plan', inputSchema: { type: 'object' } },
 ]);
 assert.deepEqual(tools[0].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
 assert.deepEqual(tools[1].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
-assert.deepEqual(tools[0]._meta, {
-  ui: { resourceUri: GITHUB_MCP_APP_URI, visibility: ['model'] },
-  'openai/outputTemplate': GITHUB_MCP_APP_URI,
-});
-assert.deepEqual(tools[1]._meta, {
-  ui: { resourceUri: GITHUB_MCP_APP_URI, visibility: ['model'] },
-  'openai/outputTemplate': GITHUB_MCP_APP_URI,
-});
+assert.deepEqual(tools[2].outputSchema, GITHUB_MCP_OUTPUT_SCHEMA);
+assert.equal(tools[0]._meta, undefined);
+assert.equal(tools[1]._meta, undefined);
 assert.deepEqual(tools[2]._meta, {
   ui: { resourceUri: GITHUB_MCP_APP_URI, visibility: ['model'] },
   'openai/outputTemplate': GITHUB_MCP_APP_URI,
 });
 assert.deepEqual(
-  [...new Set(tools.map((tool) => tool._meta['openai/outputTemplate']))],
+  [...new Set(tools.flatMap((tool) => tool._meta ? [tool._meta['openai/outputTemplate']] : []))],
   [GITHUB_MCP_APP_URI],
 );
+assert.deepEqual(GITHUB_MCP_APP_TOOL_NAMES, ['get_verification_plan', 'compare_and_verify_pr']);
 
 const result = decorateGithubToolResult('compare_refs', {
   content: [{ type: 'text', text: JSON.stringify({ status: 'ahead', additions: 12 }) }],
