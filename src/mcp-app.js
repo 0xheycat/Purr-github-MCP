@@ -7,15 +7,6 @@
 // structured tool results.
 
 export const GITHUB_MCP_APP_URI = 'ui://purr/github-workbench-v8.html';
-export const GITHUB_MCP_APP_LEGACY_URIS = Object.freeze([
-  'ui://purr/github-workbench.html',
-  'ui://purr/github-workbench-v2.html',
-  'ui://purr/github-workbench-v3.html',
-  'ui://purr/github-workbench-v4.html',
-  'ui://purr/github-workbench-v5.html',
-  'ui://purr/github-workbench-v6.html',
-  'ui://purr/github-workbench-v7.html',
-]);
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
 
 export const GITHUB_MCP_APP_TOOL_NAMES = Object.freeze([
@@ -24,11 +15,6 @@ export const GITHUB_MCP_APP_TOOL_NAMES = Object.freeze([
 ]);
 
 const GITHUB_MCP_APP_TOOLS = new Set(GITHUB_MCP_APP_TOOL_NAMES);
-
-const GITHUB_MCP_APP_READABLE_URIS = new Set([
-  GITHUB_MCP_APP_URI,
-  ...GITHUB_MCP_APP_LEGACY_URIS,
-]);
 
 export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
@@ -125,7 +111,7 @@ export function listGithubMcpAppResources() {
 }
 
 export function readGithubMcpAppResource(uri) {
-  if (!GITHUB_MCP_APP_READABLE_URIS.has(uri)) return null;
+  if (uri !== GITHUB_MCP_APP_URI) return null;
   return {
     contents: [
       {

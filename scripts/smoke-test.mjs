@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import {
-  GITHUB_MCP_APP_LEGACY_URIS,
   GITHUB_MCP_APP_MIME_TYPE,
   GITHUB_MCP_APP_TOOL_NAMES,
   GITHUB_MCP_APP_URI,
@@ -183,7 +182,7 @@ try {
   if (uiBoundTools !== GITHUB_MCP_APP_TOOL_NAMES.length) {
     throw new Error(`Unexpected render tool count: ${uiBoundTools}`);
   }
-  for (const uri of [...templateUris, ...GITHUB_MCP_APP_LEGACY_URIS]) {
+  for (const uri of templateUris) {
     const read = await request('/mcp', {
       jsonrpc: '2.0',
       id: `resource:${uri}`,

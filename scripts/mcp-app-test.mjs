@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { Script } from 'node:vm';
 import {
-  GITHUB_MCP_APP_LEGACY_URIS,
   GITHUB_MCP_APP_MIME_TYPE,
   GITHUB_MCP_APP_TOOL_NAMES,
   GITHUB_MCP_APP_URI,
@@ -91,12 +90,8 @@ assert.notEqual(widgetScript, '');
 assert.doesNotThrow(() => new Script(widgetScript));
 assert.equal(resource.contents[0]._meta.ui.prefersBorder, false);
 assert.equal(resource.contents[0]._meta.ui.csp, undefined);
-for (const legacyUri of GITHUB_MCP_APP_LEGACY_URIS) {
-  const legacy = readGithubMcpAppResource(legacyUri);
-  assert.equal(legacy.contents[0].uri, legacyUri);
-  assert.equal(legacy.contents[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
-  assert.match(legacy.contents[0].text, /github-workbench-v8/);
-}
+assert.equal(readGithubMcpAppResource('ui://purr/github-workbench-v7.html'), null);
+assert.equal(readGithubMcpAppResource('ui://purr/github-workbench.html'), null);
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 
 console.log('MCP App UI tests passed');
