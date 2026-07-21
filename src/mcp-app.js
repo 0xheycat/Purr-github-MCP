@@ -12,9 +12,18 @@ export const GITHUB_MCP_APP_LEGACY_URIS = Object.freeze([
   'ui://purr/github-workbench-v2.html',
   'ui://purr/github-workbench-v3.html',
   'ui://purr/github-workbench-v4.html',
+  'ui://purr/github-workbench-v5.html',
+  'ui://purr/github-workbench-v6.html',
   'ui://purr/github-workbench-v7.html',
 ]);
 export const GITHUB_MCP_APP_MIME_TYPE = 'text/html;profile=mcp-app';
+
+export const GITHUB_MCP_APP_TOOL_NAMES = Object.freeze([
+  'get_verification_plan',
+  'compare_and_verify_pr',
+]);
+
+const GITHUB_MCP_APP_TOOLS = new Set(GITHUB_MCP_APP_TOOL_NAMES);
 
 const GITHUB_MCP_APP_READABLE_URIS = new Set([
   GITHUB_MCP_APP_URI,
@@ -35,7 +44,7 @@ export const GITHUB_MCP_OUTPUT_SCHEMA = Object.freeze({
 });
 
 export function githubMcpAppToolMeta(toolName) {
-  if (!toolName) return undefined;
+  if (!toolName || !GITHUB_MCP_APP_TOOLS.has(toolName)) return undefined;
   return {
     ui: {
       resourceUri: GITHUB_MCP_APP_URI,
