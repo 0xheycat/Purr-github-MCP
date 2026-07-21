@@ -82,12 +82,12 @@ assert.match(resource.contents[0].text, /Purr GitHub Workbench/);
 assert.match(resource.contents[0].text, /window\.openai\?\.toolOutput/);
 assert.match(resource.contents[0].text, /openai:set_globals/);
 assert.match(resource.contents[0].text, /ui\/notifications\/tool-result/);
-assert.match(resource.contents[0].text, /let expanded = false/);
-assert.match(resource.contents[0].text, /github-workbench-v7/);
-assert.match(resource.contents[0].text, /Reference comparison/);
-assert.match(resource.contents[0].text, /raw\.addEventListener\("toggle"/);
-assert.match(resource.contents[0].text, /content-visibility: auto/);
-assert.doesNotMatch(resource.contents[0].text, /Raw payload is rendered on demand\./);
+assert.match(resource.contents[0].text, /let expanded=false/);
+assert.match(resource.contents[0].text, /github-workbench-v8/);
+assert.match(resource.contents[0].text, /details\.addEventListener\("toggle"/);
+assert.match(resource.contents[0].text, /Raw preview/);
+assert.ok(Buffer.byteLength(resource.contents[0].text, 'utf8') < 16000);
+assert.doesNotMatch(resource.contents[0].text, /content-visibility|transition:/);
 assert.doesNotMatch(resource.contents[0].text, /cdn\.jsdelivr\.net|@modelcontextprotocol\/ext-apps/);
 const widgetScript = resource.contents[0].text.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
 assert.notEqual(widgetScript, '');
@@ -98,7 +98,7 @@ for (const legacyUri of GITHUB_MCP_APP_LEGACY_URIS) {
   const legacy = readGithubMcpAppResource(legacyUri);
   assert.equal(legacy.contents[0].uri, legacyUri);
   assert.equal(legacy.contents[0].mimeType, GITHUB_MCP_APP_MIME_TYPE);
-  assert.match(legacy.contents[0].text, /github-workbench-v7/);
+  assert.match(legacy.contents[0].text, /github-workbench-v8/);
 }
 assert.equal(readGithubMcpAppResource('ui://missing'), null);
 
