@@ -14,7 +14,7 @@ A Node.js MCP server that connects ChatGPT, Notion, and other agents to GitHub t
 - ChatGPT OAuth 2.1 authorization-code flow with mandatory PKCE S256.
 - GitHub App browser login for per-user GitHub credentials.
 - Legacy Bearer and owner-token compatibility routes.
-- 35 GitHub tools with the existing safety policies preserved.
+- 40 GitHub tools with the existing safety policies preserved, including pull request lifecycle, checks, review threads, reviewer requests, and branch updates.
 - Durable encrypted OAuth and GitHub credential storage.
 - Refresh-token rotation, single-flight GitHub refresh, and signed revocation webhooks.
 - Protected-branch, repository allowlist, payload, path, and secret-scanning guards.
@@ -196,7 +196,7 @@ The suite covers:
 - installation lifecycle tracking
 - scope-filtered tool dispatch
 - legacy compatibility
-- 35-tool smoke parity
+- 40-tool smoke parity
 - large commits, annotations, and secret blocking
 
 ## Deployment
