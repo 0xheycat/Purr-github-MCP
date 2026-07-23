@@ -1,6 +1,6 @@
 # GitHub App permission matrix for the existing Purr catalog
 
-This matrix covers the complete 35-tool catalog on `feat/oauth-chatgpt-durable`. It is an execution map, not a replacement registry.
+This matrix covers the complete 40-tool catalog on `feat/pr-lifecycle-pack`. It is an execution map, not a replacement registry.
 
 Higher-level Purr scopes remain:
 
@@ -16,6 +16,7 @@ GitHub App repository permissions are additional provider-side requirements. Exi
 | `get_repository` | `github.read` | repository metadata | Metadata: read | Private repository visibility also depends on installation/repository access. |
 | `list_issues` | `github.read` | issues | Issues: read | Pull requests returned by the endpoint remain filtered by the existing handler. |
 | `list_pull_requests` | `github.read` | pull requests | Pull requests: read | No handler change. |
+| `get_pull_request` | `github.read` | pull requests, commits, checks, statuses | Pull requests: read; Contents: read; Checks: read; Commit statuses: read | Method-dependent: PR detail/diff/files/commits/reviews/review threads/requested reviewers use Pull requests: read; combined status uses Commit statuses: read; check runs use Checks: read. |
 | `get_file` | `github.read` | contents | Contents: read | Existing unsafe-path checks remain. |
 | `list_directory` | `github.read` | contents | Contents: read | Existing repository allow-list remains. |
 | `create_issue` | `github.write` | issues | Issues: write | User must also be able to access the selected repository. |
@@ -32,6 +33,9 @@ GitHub App repository permissions are additional provider-side requirements. Exi
 | `create_branch_commit_pr` | `github.write` | contents + pull requests | Contents: write; Pull requests: write | Both provider permissions are required. |
 | `commit_files_from_manifest_url` | `github.write` | contents/git data | Contents: write | Provider permission does not bypass outbound download and content checks. |
 | `update_pull_request` | `github.write` | pull requests | Pull requests: write | Closing/updating remains GitHub-authorized per user. |
+| `update_pull_request_draft_state` | `github.write` | pull request GraphQL mutations | Pull requests: write | Converts to draft or marks ready for review; the handler performs a read-before-write no-op check. |
+| `request_pull_request_reviewers` | `github.write` | review requests | Pull requests: write | May send reviewer notifications; intentionally not marked idempotent. |
+| `update_pull_request_branch` | `github.write` | pull request update branch | Pull requests: write; Contents: write | Merges the current base into the PR head subject to GitHub rules; intentionally not marked idempotent. |
 | `comment_pull_request` | `github.write` | issue comments | Issues: write | PR conversation comments use the issues comments endpoint. |
 | `get_verification_plan` | `github.plan` | repository contents | Contents: read | Planning remains read-only and does not execute commands. |
 | `verify_mcp_deploy` | `github.read` | external HTTP probe | none | No GitHub token should be attached to the target URL unless explicitly supplied by the tool input. |
@@ -57,10 +61,12 @@ Metadata: read
 Contents: read and write
 Issues: read and write
 Pull requests: read and write
+Checks: read
+Commit statuses: read
 Administration: read and write
 ```
 
-Administration is required only for `create_repository` and must not weaken `ALLOW_REPO_CREATE`. If GitHub's live user-token endpoint does not permit the expected repository-creation operation, that tool continues to use the legacy owner route until an official supported method is verified. The tool is not removed.
+Checks and Commit statuses are required for `get_pull_request` methods `get_check_runs` and `get_status`. Existing GitHub App installations must approve those added read permissions before private-repository acceptance testing. Administration is required only for `create_repository` and must not weaken `ALLOW_REPO_CREATE`. If GitHub's live user-token endpoint does not permit the expected repository-creation operation, that tool continues to use the legacy owner route until an official supported method is verified. The tool is not removed.
 
 ## Account and repository isolation
 

@@ -334,6 +334,7 @@ function githubGraphqlEndpoint() {
 async function githubGraphqlRequest(token, query, variables) {
   const res = await githubFetch(token, githubGraphqlEndpoint(), {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, variables }),
   });
   const text = await res.text();
@@ -393,6 +394,69 @@ function pullRequestSummary(pr) {
     closed_at: pr.closed_at,
     merged_at: pr.merged_at,
     html_url: pr.html_url,
+  };
+}
+
+async function pullRequestReviewThreads(token, owner, repo, number, args = {}) {
+  const first = Math.min(100, Math.max(1, Number.parseInt(args.per_page ?? 50, 10) || 50));
+  const after = args.cursor ? String(args.cursor) : null;
+  const query = `query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: $first, after: $after) {
+          totalCount
+          pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+          nodes {
+            id
+            isResolved
+            isOutdated
+            isCollapsed
+            comments(first: 100) {
+              totalCount
+              nodes {
+                id
+                body
+                path
+                line
+                author { login }
+                createdAt
+                updatedAt
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+  }`;
+  const data = await githubGraphqlRequest(token, query, { owner, repo, number, first, after });
+  const connection = data?.repository?.pullRequest?.reviewThreads;
+  if (!connection) throw new Error('Pull request review threads are unavailable.');
+  return {
+    total_count: connection.totalCount ?? 0,
+    threads: (connection.nodes ?? []).map((thread) => ({
+      id: thread.id,
+      resolved: Boolean(thread.isResolved),
+      outdated: Boolean(thread.isOutdated),
+      collapsed: Boolean(thread.isCollapsed),
+      comments_total_count: thread.comments?.totalCount ?? 0,
+      comments: (thread.comments?.nodes ?? []).map((comment) => ({
+        id: comment.id,
+        user: comment.author?.login,
+        body: comment.body,
+        path: comment.path,
+        line: comment.line,
+        created_at: comment.createdAt,
+        updated_at: comment.updatedAt,
+        html_url: comment.url,
+      })),
+    })),
+    page_info: {
+      has_next_page: Boolean(connection.pageInfo?.hasNextPage),
+      has_previous_page: Boolean(connection.pageInfo?.hasPreviousPage),
+      start_cursor: connection.pageInfo?.startCursor ?? null,
+      end_cursor: connection.pageInfo?.endCursor ?? null,
+    },
   };
 }
 
@@ -860,7 +924,7 @@ const tools = [
   },
   {
     name: 'get_pull_request',
-    description: 'Read pull request details, diff, files, commits, status, checks, reviews, comments, or requested reviewers.',
+    description: 'Read pull request details, diff, files, commits, status, checks, reviews, review threads, comments, or requested reviewers.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     inputSchema: {
       type: 'object',
@@ -872,8 +936,9 @@ const tools = [
           enum: ['get', 'get_diff', 'get_files', 'get_commits', 'get_status', 'get_check_runs', 'get_reviews', 'get_review_comments', 'get_comments', 'get_requested_reviewers'],
           default: 'get',
         },
-        page: { type: 'number', default: 1 },
+        page: { type: 'number', default: 1, description: 'REST page number for list methods.' },
         per_page: { type: 'number', default: 50 },
+        cursor: { type: 'string', description: 'GraphQL cursor for get_review_comments thread pagination.' },
       },
       required: ['repo', 'number'],
     },
@@ -932,21 +997,7 @@ const tools = [
         })));
       }
       if (method === 'get_review_comments') {
-        const comments = await githubRequest(ctx.githubToken, `${base}/comments?${pagination}`);
-        return textResult(comments.map((comment) => ({
-          id: comment.id,
-          user: comment.user?.login,
-          body: comment.body,
-          path: comment.path,
-          line: comment.line,
-          side: comment.side,
-          start_line: comment.start_line,
-          start_side: comment.start_side,
-          in_reply_to_id: comment.in_reply_to_id,
-          created_at: comment.created_at,
-          updated_at: comment.updated_at,
-          html_url: comment.html_url,
-        })));
+        return textResult(await pullRequestReviewThreads(ctx.githubToken, owner, repo, number, args));
       }
       if (method === 'get_comments') {
         const comments = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/issues/${number}/comments?${pagination}`);
@@ -1666,8 +1717,9 @@ const tools = [
     handler: async (args, ctx) => {
       const { owner, repo } = validateRepo(args.repo);
       const number = validatePullNumber(args.number);
+      if (typeof args.draft !== 'boolean') throw new Error('draft must be a boolean.');
       const current = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls/${number}`);
-      const desiredDraft = Boolean(args.draft);
+      const desiredDraft = args.draft;
       if (Boolean(current.draft) === desiredDraft) {
         return textResult({
           number: current.number,
@@ -1698,7 +1750,7 @@ const tools = [
   {
     name: 'request_pull_request_reviewers',
     description: 'Request pull request reviews from GitHub users and/or organization teams.',
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1732,7 +1784,7 @@ const tools = [
   {
     name: 'update_pull_request_branch',
     description: 'Update a pull request head branch with the latest changes from its base branch.',
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: 'object',
       properties: {
