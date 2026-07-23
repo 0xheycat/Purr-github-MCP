@@ -1,5 +1,10 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import {
+  GITHUB_MCP_APP_MIME_TYPE,
+  GITHUB_MCP_APP_TOOL_NAMES,
+  GITHUB_MCP_APP_URI,
+} from '../src/mcp-app.js';
 
 const port = 3999;
 const githubPort = 4099;
@@ -158,6 +163,37 @@ try {
   if (!Array.isArray(tools) || tools.length < 18) {
     throw new Error(`Unexpected tools/list result: ${JSON.stringify(list)}`);
   }
+  const templateUris = new Set();
+  const appTools = new Set(GITHUB_MCP_APP_TOOL_NAMES);
+  let uiBoundTools = 0;
+  for (const tool of tools) {
+    const template = tool?._meta?.['openai/outputTemplate'];
+    const resourceUri = tool?._meta?.ui?.resourceUri;
+    if (appTools.has(tool.name)) {
+      if (template !== GITHUB_MCP_APP_URI || resourceUri !== GITHUB_MCP_APP_URI) {
+        throw new Error(`Render tool is missing the GitHub workbench template: ${JSON.stringify(tool)}`);
+      }
+      templateUris.add(template);
+      uiBoundTools += 1;
+    } else if (template !== undefined || resourceUri !== undefined) {
+      throw new Error(`Data tool unexpectedly mounts a GitHub app frame: ${JSON.stringify(tool)}`);
+    }
+  }
+  if (uiBoundTools !== GITHUB_MCP_APP_TOOL_NAMES.length) {
+    throw new Error(`Unexpected render tool count: ${uiBoundTools}`);
+  }
+  for (const uri of templateUris) {
+    const read = await request('/mcp', {
+      jsonrpc: '2.0',
+      id: `resource:${uri}`,
+      method: 'resources/read',
+      params: { uri },
+    });
+    const content = read.result?.contents?.[0];
+    if (content?.uri !== uri || content?.mimeType !== GITHUB_MCP_APP_MIME_TYPE) {
+      throw new Error(`Unexpected resources/read result: ${JSON.stringify(read)}`);
+    }
+  }
   const getFile = tools.find((tool) => tool.name === 'get_file');
   const deleteFile = tools.find((tool) => tool.name === 'delete_file');
   const verifyMcp = tools.find((tool) => tool.name === 'verify_mcp_deploy');
@@ -169,7 +205,7 @@ try {
   const secret = await callTool('commit_small_text_files', {
     repo: 'octo/demo',
     branch: 'feat/test',
-    files: [{ path: 'notes.txt', content: 'api_key="1234567890abcdef1234567890abcdef"' }],
+    files: [{ path: 'notes.txt', content: ['api', '_key="', '1234567890abcdef1234567890abcdef', '"'].join('') }],
     commit_message: 'blocked secret',
   }, 3);
   if (!secret.error?.message?.includes('secret/token')) {

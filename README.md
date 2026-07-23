@@ -1,271 +1,237 @@
-# 🐾 purr-github-MCP
+# 🐾 Purr GitHub MCP
 
-A lightweight, production-grade [MCP](https://modelcontextprotocol.io) server that connects AI agents (Notion, Claude, custom workflows) to GitHub via a Bearer-authenticated HTTP endpoint.
+A Node.js MCP server that connects ChatGPT, Notion, and other agents to GitHub through a guarded HTTP tool layer.
 
 ![Runtime](https://img.shields.io/badge/runtime-Node.js%2022+-3C873A?style=for-the-badge&logo=node.js&logoColor=white)
 ![MCP](https://img.shields.io/badge/protocol-MCP-7C3AED?style=for-the-badge)
-![Auth](https://img.shields.io/badge/auth-Bearer%20Token-111827?style=for-the-badge)
+![Auth](https://img.shields.io/badge/auth-OAuth%20%2B%20Bearer-111827?style=for-the-badge)
 ![Deploy](https://img.shields.io/badge/deploy-Manufact-0EA5E9?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-MIT-F59E0B?style=for-the-badge)
 
-**Quick Start** · **Authentication** · **Notion Setup** · **Manufact Deploy** · **Tools** · **Configuration** · **Roadmap**
+## What it provides
 
----
+- MCP over HTTP at `POST /mcp`.
+- ChatGPT OAuth 2.1 authorization-code flow with mandatory PKCE S256.
+- GitHub App browser login for per-user GitHub credentials.
+- Legacy Bearer and owner-token compatibility routes.
+- 40 GitHub tools with the existing safety policies preserved, including pull request lifecycle, checks, review threads, reviewer requests, and branch updates.
+- Durable encrypted OAuth and GitHub credential storage.
+- Refresh-token rotation, single-flight GitHub refresh, and signed revocation webhooks.
+- Protected-branch, repository allowlist, payload, path, and secret-scanning guards.
 
-## Features
+The GitHub tool registry and handlers remain in `src/server.js`. OAuth, user identity, and credential selection are implemented by the public wrapper without rewriting those tools.
 
-- **MCP over HTTP** — single endpoint (`POST /mcp`, `GET /mcp`) compatible with any MCP client.
-- **Zero runtime dependencies** — uses Node 22 native `fetch` and `http`. No `bun`, no `@octokit`, no additional frameworks.
-- **Two auth modes** — passthrough (client sends its own GitHub PAT) or server-token (proxy with a shared GitHub token).
-- **Safe write tools** — branch prefix enforcement, protected branch blocking, file size/content guards.
-- **Cloud-native** — ready for Manufact, Fly.io, Railway, or any Node host.
+## Architecture
 
----
+```text
+ChatGPT
+  -> Purr OAuth + PKCE
+  -> GitHub App browser authorization
+  -> encrypted GitHub user credential reference
+  -> public credential router
+  -> loopback-only existing MCP server
+  -> GitHub API as that user
+```
 
-## Quick Start
+Compatibility access remains available:
+
+```text
+valid SERVER_TOKEN
+  -> existing owner GITHUB_TOKEN
+  -> existing tools
+```
+
+The internal MCP child runs only on loopback. The public wrapper removes the owner credentials from the child environment and injects the correct GitHub credential per request.
+
+## Maintained upstream components
+
+The GitHub login design follows the official `github/github-mcp-server` OAuth patterns.
+
+Runtime integration uses maintained Octokit packages:
+
+```text
+@octokit/oauth-app
+@octokit/webhooks
+```
+
+Octokit handles GitHub authorization URLs, code exchange, refresh, revocation, and webhook signature verification.
+
+## Quick start
 
 ```bash
-git clone https://github.com/0xheycat/purr-github-MCP.git
-cd purr-github-MCP
-cp .env.example .env
+git clone https://github.com/0xheycat/Purr-github-MCP.git
+cd Purr-github-MCP
+npm install
 npm run check
 npm start
 ```
 
-Server starts on `PORT` or `3000` by default.
+The public server starts on `PORT`, default `3000`.
 
 ```bash
 curl http://localhost:3000/health
 ```
 
-```json
-{
-  "status": "ok",
-  "name": "purr-github-MCP",
-  "version": "1.0.0"
-}
+## Authentication modes
+
+### ChatGPT OAuth with GitHub user login
+
+Configure the public OAuth server and a GitHub App. ChatGPT connects to:
+
+```text
+https://<public-host>/mcp
 ```
 
----
+Requested Purr scopes are hierarchical:
 
-## Authentication
+```text
+github.read -> github.plan -> github.write -> github.admin
+```
 
-### 1. Passthrough — recommended for Notion
+A client requesting `github.admin` receives the complete current tool catalog. GitHub's own user and GitHub App permissions are enforced again when a tool executes.
 
-The agent sends its own GitHub PAT directly. No shared token lives on the server.
+See [`docs/chatgpt-oauth.md`](docs/chatgpt-oauth.md).
+
+### Legacy owner route
 
 ```bash
-AUTH_MODE=passthrough
+SERVER_TOKEN=<private-mcp-token>
+GITHUB_TOKEN=<owner-github-token>
 ```
 
-```http
-Authorization: Bearer github_pat_xxx
+A direct valid `SERVER_TOKEN` continues to use the owner GitHub credential and receives the existing full catalog.
+
+### Direct passthrough clients
+
+The bare server still supports direct GitHub Bearer credentials for trusted internal or local integrations. The hosted OAuth wrapper itself controls access to its loopback child.
+
+## GitHub App endpoints
+
+```text
+GET  /oauth/github/callback
+POST /oauth/github/webhooks
 ```
 
-### 2. Server token
+Required GitHub App events:
 
-The agent authenticates with a server-side secret; the server proxies with `GITHUB_TOKEN`.
-
-```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=your-notion-facing-secret
-GITHUB_TOKEN=github_pat_xxx
+```text
+github_app_authorization
+installation
+installation_repositories
 ```
 
-```http
-Authorization: Bearer your-notion-facing-secret
-```
+The full permission matrix for the current tools is in [`docs/github-app-permissions.md`](docs/github-app-permissions.md).
 
----
-
-## Notion MCP setup
-
-| Field | Value |
-|---|---|
-| Endpoint | `https://your-host/mcp` |
-| Auth type | Bearer Token |
-| Token | `github_pat_xxx` |
-
-First smoke test: call `get_authenticated_user`. If it returns your GitHub login, the chain is working.
-
----
-
-## Manufact deployment
-
-This repo deploys as a standard Node HTTP service.
-
-### Required env
+## Core production environment
 
 ```bash
 PORT=3000
 HOST=0.0.0.0
-AUTH_MODE=passthrough
+
+SERVER_TOKEN=<existing-private-mcp-token>
+GITHUB_TOKEN=<existing-owner-github-token>
+
+PUBLIC_BASE_URL=https://<public-host>
+OAUTH_RESOURCE_URL=https://<public-host>/mcp
+OAUTH_ISSUER=https://<authorization-host>
+OAUTH_AUTHORIZATION_SERVERS=https://<authorization-host>
+OAUTH_CLIENT_ID=chatgpt-purr-git
+OAUTH_ALLOWED_REDIRECT_URIS=<exact-chatgpt-callback>
+OAUTH_STORE_PATH=/var/lib/purr-github-mcp/oauth-store.json
+
+GITHUB_APP_CLIENT_ID=<github-app-client-id>
+GITHUB_APP_CLIENT_SECRET=<github-app-client-secret>
+GITHUB_APP_CALLBACK_URL=https://<public-host>/oauth/github/callback
+GITHUB_APP_WEBHOOK_SECRET=<github-app-webhook-secret>
 ```
 
-### For server-token mode
+Use a persistent volume for `OAUTH_STORE_PATH`. Independent encryption and cookie keys are recommended:
 
 ```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=<random-secret>
-GITHUB_TOKEN=<github_pat_or_fine_grained_token>
+OAUTH_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+OAUTH_COOKIE_KEY=<base64-encoded-32-byte-key>
+OAUTH_SECRET_SOURCE=<independent-secret-source>
 ```
 
-### Start
-
-```bash
-npm start
-```
-
-### Health
-
-```
-GET /health
-```
-
-### MCP
-
-```
-POST /mcp
-GET  /mcp
-```
-
-Full deployment notes in [`docs/manufact.md`](docs/manufact.md).
-
----
-
-## Tools
-
-### Read-only
-
-| Tool | Description |
-|---|---|
-| `get_authenticated_user` | Verify the GitHub account associated with the Bearer token. |
-| `get_repository` | Read repository metadata. |
-| `list_issues` | List repository issues (excludes PRs). |
-| `list_pull_requests` | List pull requests. |
-| `get_file` | Read a small text file from a branch or ref. |
-| `list_directory` | List files and folders at a repository path. |
-
-### Write
-
-| Tool | Description | Safeguards |
-|---|---|---|
-| `create_issue` | Create a GitHub issue. | Requires repo access. |
-| `create_branch` | Create a feature/fix/docs/etc. branch. | Prefix enforced. |
-| `commit_small_text_files` | Commit small text files to an existing branch. | Protected branches blocked. |
-| `create_branch_and_commit` | Create a branch and commit text files. | Prefix + file safety enforced. |
-| `create_pull_request` | Open a PR from an existing branch. | No direct merge. |
-
-No delete, force-push, workflow editing, secrets management, or direct merge tools are exposed.
-
----
+Partial GitHub App configuration fails at startup rather than silently downgrading.
 
 ## Safety model
 
-The server blocks risky operations by default.
+Existing controls apply regardless of whether a request uses the owner credential or a GitHub user credential.
 
 ### Protected branches
 
-Direct commits to these branches are refused:
+Direct commits are blocked by default on:
 
-```
+```text
 main, master, production, staging, release
 ```
 
-Override with:
+### Branch prefixes
 
-```bash
-PROTECTED_BRANCHES=main,master,production
-```
+New branches must use an approved prefix such as:
 
-### Branch prefix enforcement
-
-New branches must start with one of:
-
-```
+```text
 feat/, fix/, docs/, chore/, refactor/, test/, perf/
 ```
 
-Override with:
+### Write guards
 
-```bash
-BRANCH_PREFIXES=feat/,fix/,docs/
-```
+Write tools enforce repository policy, file-count and byte limits, dangerous-path blocking, secret-like content detection, and operation-specific controls. Large and binary writes remain available only through the bounded tools intended for them.
 
-### File-level guards
-
-`commit_small_text_files` and `create_branch_and_commit` enforce:
-
-- Maximum 5 files per commit
-- Maximum 50 KB total payload
-- Maximum 30 KB per file
-- No secret-like tokens or dangerous paths (`.env`, private keys, DB files, archives, PDFs, build output, CI workflow edits). Common image assets are allowed by default; other binary files remain opt-in.
-
----
-
-## Environment reference
-
-| Variable | Default | Description |
-|---|---:|---|
-| `PORT` | `3000` | HTTP port. |
-| `HOST` | `0.0.0.0` | Bind address. |
-| `AUTH_MODE` | `passthrough` | `passthrough` or `server_token`. |
-| `SERVER_TOKEN` | empty | Required for `server_token` mode. |
-| `GITHUB_TOKEN` | empty | Required for `server_token` mode. |
-| `ALLOWED_REPOS` | empty | Optional comma-separated `owner/repo` allowlist. |
-| `PROTECTED_BRANCHES` | `main,master,production,staging,release` | Blocks commits to these branches. |
-| `BRANCH_PREFIXES` | `feat/,fix/,docs/,chore/,refactor/,test/,perf/` | Required prefixes for new branches. |
-| `MAX_FILES_PER_COMMIT` | `5` | Per-commit file limit. |
-| `MAX_BYTES_PER_COMMIT` | `50000` | Total payload limit. |
-| `MAX_BYTES_PER_FILE` | `100000000` | Per-file payload limit. |
-| `CORS_ORIGIN` | `*` | CORS origin. Tighten in production. |
-
----
-
-## Local validation
+## Verification
 
 ```bash
 npm run check
 ```
 
-Runs:
+The suite covers:
 
-1. `node --check src/server.js`
-2. `scripts/smoke-test.mjs` — starts a local server, checks `/health`, initializes MCP, and verifies tools list.
+- ChatGPT PKCE and refresh rotation
+- GitHub callback binding and replay rejection
+- encrypted user credentials and user isolation
+- user-token versus owner-token routing
+- concurrent GitHub refresh serialization
+- signed authorization revocation
+- installation lifecycle tracking
+- scope-filtered tool dispatch
+- legacy compatibility
+- 40-tool smoke parity
+- large commits, annotations, and secret blocking
 
----
+## Deployment
+
+Docker:
+
+```bash
+docker build -t purr-github-mcp .
+docker run --rm -p 3000:3000 --env-file .env purr-github-mcp
+```
+
+Manufact and process-runner deployments use:
+
+```bash
+npm install --omit=dev
+npm start
+```
+
+See [`docs/manufact.md`](docs/manufact.md) for deployment and [`docs/chatgpt-oauth.md`](docs/chatgpt-oauth.md) for GitHub App setup, acceptance checks, and rollback.
 
 ## Repository structure
 
 ```text
-purr-github-MCP/
-├── src/server.js              # HTTP MCP server
-├── scripts/smoke-test.mjs     # Smoke tests
-├── docs/
-│   ├── manufact.md            # Deployment guide
-│   └── notion.md              # Notion integration guide
-├── .github/workflows/ci.yml   # CI pipeline
-├── .env.example               # Environment template
-├── Dockerfile                 # Container build
-├── Procfile                   # Process runner hint
-├── SECURITY.md
-├── CONTRIBUTING.md
-├── CHANGELOG.md
-└── LICENSE
+Purr-github-MCP/
+├── src/server.js                 # existing GitHub MCP tools and guards
+├── src/oauth-wrapper.js          # public OAuth and routing entrypoint
+├── src/oauth/                    # durable ChatGPT OAuth primitives
+├── src/github-auth/              # GitHub App identity and lifecycle adapter
+├── scripts/                      # OAuth, routing, lifecycle, and smoke tests
+├── docs/                         # architecture, permissions, and deployment
+├── Dockerfile
+├── Procfile
+└── package.json
 ```
-
----
-
-## Roadmap
-
-- OAuth flow for multi-user hosted usage
-- Richer PR triage tools with CI status summaries
-- Issue-to-branch workflow helpers
-- Per-tool rate-limit reporting
-- Optional repository-level policy configuration
-
----
 
 ## License
 
-MIT — use it, adapt it, ship it.
+MIT

@@ -1,17 +1,27 @@
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, open, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { promisify } from 'node:util';
 import { extraTools } from './extensions.js';
+import {
+  decorateGithubInitialize,
+  decorateGithubToolResult,
+  decorateGithubTools,
+  listGithubMcpAppResources,
+  readGithubMcpAppResource,
+} from './mcp-app.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.3-file-bridge';
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const GITHUB_BLOB_HARD_LIMIT_BYTES = 100_000_000;
 const GITHUB_LARGE_FILE_WARNING_BYTES = 50_000_000;
 const SAMPLE_BYTES = 8192;
+const execFileAsync = promisify(execFile);
 
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
@@ -45,6 +55,7 @@ const config = {
   githubToken: env('GITHUB_TOKEN'),
   corsOrigin: env('CORS_ORIGIN', '*'),
   githubApiBase: env('GITHUB_API_BASE', 'https://api.github.com').replace(/\/+$/, ''),
+  publicBaseUrl: env('PUBLIC_BASE_URL').replace(/\/+$/, ''),
   allowedRepos: splitList(env('ALLOWED_REPOS')),
   protectedBranches: new Set(splitList(env('PROTECTED_BRANCHES', 'main,master,production,staging,release'))),
   branchPrefixes: splitList(env('BRANCH_PREFIXES', 'feat/,fix/,docs/,chore/,refactor/,test/,perf/')),
@@ -271,9 +282,8 @@ function validateFiles(files) {
   return validated;
 }
 
-async function githubRequest(token, route, options = {}) {
-  const url = `${config.githubApiBase}${route}`;
-  const res = await fetch(url, {
+async function githubFetch(token, url, options = {}) {
+  return fetch(url, {
     ...options,
     ...(options.body && typeof options.body !== 'string' ? { duplex: 'half' } : {}),
     headers: {
@@ -284,14 +294,170 @@ async function githubRequest(token, route, options = {}) {
       ...(options.headers ?? {}),
     },
   });
+}
 
+async function githubRequest(token, route, options = {}) {
+  const res = await githubFetch(token, `${config.githubApiBase}${route}`, options);
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`GitHub API ${res.status}: expected JSON response.`);
+  }
   if (!res.ok) {
     const message = data?.message ?? `${res.status} ${res.statusText}`;
     throw new Error(`GitHub API ${res.status}: ${message}`);
   }
   return data;
+}
+
+async function githubTextRequest(token, route, options = {}) {
+  const res = await githubFetch(token, `${config.githubApiBase}${route}`, options);
+  const text = await res.text();
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      message = JSON.parse(text)?.message ?? message;
+    } catch {}
+    throw new Error(`GitHub API ${res.status}: ${message}`);
+  }
+  return text;
+}
+
+function githubGraphqlEndpoint() {
+  return /\/api\/v3$/i.test(config.githubApiBase)
+    ? config.githubApiBase.replace(/\/api\/v3$/i, '/api/graphql')
+    : `${config.githubApiBase}/graphql`;
+}
+
+async function githubGraphqlRequest(token, query, variables) {
+  const res = await githubFetch(token, githubGraphqlEndpoint(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`GitHub GraphQL ${res.status}: expected JSON response.`);
+  }
+  if (!res.ok || data?.errors?.length) {
+    const message = data?.errors?.map((error) => error.message).filter(Boolean).join('; ')
+      || data?.message
+      || `${res.status} ${res.statusText}`;
+    throw new Error(`GitHub GraphQL ${res.status}: ${message}`);
+  }
+  return data?.data;
+}
+
+function validatePullNumber(value) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) throw new Error('number must be a positive integer.');
+  return number;
+}
+
+function paginationQuery(args) {
+  const page = Math.max(1, Number.parseInt(args.page ?? 1, 10) || 1);
+  const perPage = Math.min(100, Math.max(1, Number.parseInt(args.per_page ?? 50, 10) || 50));
+  return `page=${page}&per_page=${perPage}`;
+}
+
+function pullRequestSummary(pr) {
+  return {
+    number: pr.number,
+    title: pr.title,
+    body: pr.body,
+    state: pr.state,
+    draft: Boolean(pr.draft),
+    merged: Boolean(pr.merged),
+    mergeable: pr.mergeable,
+    mergeable_state: pr.mergeable_state,
+    rebaseable: pr.rebaseable,
+    author: pr.user?.login,
+    head: { ref: pr.head?.ref, sha: pr.head?.sha, repo: pr.head?.repo?.full_name },
+    base: { ref: pr.base?.ref, sha: pr.base?.sha, repo: pr.base?.repo?.full_name },
+    requested_reviewers: (pr.requested_reviewers ?? []).map((user) => user.login),
+    requested_teams: (pr.requested_teams ?? []).map((team) => team.slug),
+    labels: (pr.labels ?? []).map((label) => label.name),
+    commits: pr.commits,
+    changed_files: pr.changed_files,
+    additions: pr.additions,
+    deletions: pr.deletions,
+    comments: pr.comments,
+    review_comments: pr.review_comments,
+    maintainer_can_modify: pr.maintainer_can_modify,
+    created_at: pr.created_at,
+    updated_at: pr.updated_at,
+    closed_at: pr.closed_at,
+    merged_at: pr.merged_at,
+    html_url: pr.html_url,
+  };
+}
+
+async function pullRequestReviewThreads(token, owner, repo, number, args = {}) {
+  const first = Math.min(100, Math.max(1, Number.parseInt(args.per_page ?? 50, 10) || 50));
+  const after = args.cursor ? String(args.cursor) : null;
+  const query = `query($owner: String!, $repo: String!, $number: Int!, $first: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: $first, after: $after) {
+          totalCount
+          pageInfo { hasNextPage hasPreviousPage startCursor endCursor }
+          nodes {
+            id
+            isResolved
+            isOutdated
+            isCollapsed
+            comments(first: 100) {
+              totalCount
+              nodes {
+                id
+                body
+                path
+                line
+                author { login }
+                createdAt
+                updatedAt
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+  }`;
+  const data = await githubGraphqlRequest(token, query, { owner, repo, number, first, after });
+  const connection = data?.repository?.pullRequest?.reviewThreads;
+  if (!connection) throw new Error('Pull request review threads are unavailable.');
+  return {
+    total_count: connection.totalCount ?? 0,
+    threads: (connection.nodes ?? []).map((thread) => ({
+      id: thread.id,
+      resolved: Boolean(thread.isResolved),
+      outdated: Boolean(thread.isOutdated),
+      collapsed: Boolean(thread.isCollapsed),
+      comments_total_count: thread.comments?.totalCount ?? 0,
+      comments: (thread.comments?.nodes ?? []).map((comment) => ({
+        id: comment.id,
+        user: comment.author?.login,
+        body: comment.body,
+        path: comment.path,
+        line: comment.line,
+        created_at: comment.createdAt,
+        updated_at: comment.updatedAt,
+        html_url: comment.url,
+      })),
+    })),
+    page_info: {
+      has_next_page: Boolean(connection.pageInfo?.hasNextPage),
+      has_previous_page: Boolean(connection.pageInfo?.hasPreviousPage),
+      start_cursor: connection.pageInfo?.startCursor ?? null,
+      end_cursor: connection.pageInfo?.endCursor ?? null,
+    },
+  };
 }
 
 function assertLargeFileSize(size, path) {
@@ -411,6 +577,45 @@ async function createBlobFromFile(token, owner, repo, filePath) {
     headers: { 'Content-Type': 'application/json' },
     body: Readable.from(base64JsonBodyFromFile(filePath)),
   });
+}
+
+
+function normalizeUploadedArchive(value) {
+  const files = Array.isArray(value) ? value : [value];
+  if (files.length !== 1) throw new Error('archive_file must contain exactly one ZIP file.');
+  const file = files[0];
+  if (!file || typeof file !== 'object') throw new Error('archive_file must be a ChatGPT file reference.');
+  const downloadUrl = file.download_url ?? file.download_link ?? file.url;
+  if (typeof downloadUrl !== 'string' || !downloadUrl) throw new Error('archive_file is missing download_url.');
+  const name = typeof file.file_name === 'string' && file.file_name
+    ? file.file_name
+    : (typeof file.name === 'string' && file.name ? file.name : 'archive.zip');
+  if (!name.toLowerCase().endsWith('.zip')) throw new Error('archive_file must be a .zip archive.');
+  return { downloadUrl, name };
+}
+
+function validateZipEntry(rawEntry) {
+  if (typeof rawEntry !== 'string' || !rawEntry) throw new Error('ZIP contains an empty path.');
+  if (rawEntry.includes('\0') || rawEntry.includes('\\')) throw new Error(`ZIP path "${rawEntry}" is unsafe.`);
+  if (rawEntry.startsWith('/') || /^[A-Za-z]:/.test(rawEntry)) throw new Error(`ZIP path "${rawEntry}" is absolute.`);
+  const segments = rawEntry.split('/');
+  if (segments.some((segment) => segment === '..')) throw new Error(`ZIP path "${rawEntry}" contains traversal.`);
+  const withoutTrailingSlash = rawEntry.endsWith('/') ? rawEntry.slice(0, -1) : rawEntry;
+  if (!withoutTrailingSlash || withoutTrailingSlash.split('/').some((segment) => !segment || segment === '.')) {
+    throw new Error(`ZIP path "${rawEntry}" is not normalized.`);
+  }
+  return withoutTrailingSlash;
+}
+
+async function readFileSample(filePath) {
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(SAMPLE_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
 function base64EncodeUtf8(input) {
@@ -715,6 +920,141 @@ const tools = [
       const perPage = Math.min(Number(args.per_page ?? 20), 100);
       const prs = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls?state=${encodeURIComponent(state)}&per_page=${perPage}`);
       return textResult(prs.map((pr) => ({ number: pr.number, title: pr.title, state: pr.state, draft: pr.draft, head: pr.head?.ref, base: pr.base?.ref, html_url: pr.html_url })));
+    },
+  },
+  {
+    name: 'get_pull_request',
+    description: 'Read pull request details, diff, files, commits, status, checks, reviews, review threads, comments, or requested reviewers.',
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository in owner/repo format.' },
+        number: { type: 'number', description: 'Pull request number.' },
+        method: {
+          type: 'string',
+          enum: ['get', 'get_diff', 'get_files', 'get_commits', 'get_status', 'get_check_runs', 'get_reviews', 'get_review_comments', 'get_comments', 'get_requested_reviewers'],
+          default: 'get',
+        },
+        page: { type: 'number', default: 1, description: 'REST page number for list methods.' },
+        per_page: { type: 'number', default: 50 },
+        cursor: { type: 'string', description: 'GraphQL cursor for get_review_comments thread pagination.' },
+      },
+      required: ['repo', 'number'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const number = validatePullNumber(args.number);
+      const method = args.method ?? 'get';
+      const base = `/repos/${owner}/${repo}/pulls/${number}`;
+      const pagination = paginationQuery(args);
+
+      if (method === 'get') {
+        return textResult(pullRequestSummary(await githubRequest(ctx.githubToken, base)));
+      }
+      if (method === 'get_diff') {
+        const diff = await githubTextRequest(ctx.githubToken, base, {
+          headers: { Accept: 'application/vnd.github.diff' },
+        });
+        return textResult({ repo: `${owner}/${repo}`, number, diff });
+      }
+      if (method === 'get_files') {
+        const files = await githubRequest(ctx.githubToken, `${base}/files?${pagination}`);
+        return textResult(files.map((file) => ({
+          sha: file.sha,
+          filename: file.filename,
+          status: file.status,
+          additions: file.additions,
+          deletions: file.deletions,
+          changes: file.changes,
+          previous_filename: file.previous_filename,
+          patch: file.patch,
+          blob_url: file.blob_url,
+          raw_url: file.raw_url,
+        })));
+      }
+      if (method === 'get_commits') {
+        const commits = await githubRequest(ctx.githubToken, `${base}/commits?${pagination}`);
+        return textResult(commits.map((commit) => ({
+          sha: commit.sha,
+          message: commit.commit?.message,
+          author: commit.author?.login ?? commit.commit?.author?.name,
+          authored_at: commit.commit?.author?.date,
+          committed_at: commit.commit?.committer?.date,
+          html_url: commit.html_url,
+        })));
+      }
+      if (method === 'get_reviews') {
+        const reviews = await githubRequest(ctx.githubToken, `${base}/reviews?${pagination}`);
+        return textResult(reviews.map((review) => ({
+          id: review.id,
+          user: review.user?.login,
+          body: review.body,
+          state: review.state,
+          commit_id: review.commit_id,
+          submitted_at: review.submitted_at,
+          html_url: review.html_url,
+        })));
+      }
+      if (method === 'get_review_comments') {
+        return textResult(await pullRequestReviewThreads(ctx.githubToken, owner, repo, number, args));
+      }
+      if (method === 'get_comments') {
+        const comments = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/issues/${number}/comments?${pagination}`);
+        return textResult(comments.map((comment) => ({
+          id: comment.id,
+          user: comment.user?.login,
+          body: comment.body,
+          created_at: comment.created_at,
+          updated_at: comment.updated_at,
+          html_url: comment.html_url,
+        })));
+      }
+      if (method === 'get_requested_reviewers') {
+        const requested = await githubRequest(ctx.githubToken, `${base}/requested_reviewers`);
+        return textResult({
+          users: (requested.users ?? []).map((user) => ({ login: user.login, html_url: user.html_url })),
+          teams: (requested.teams ?? []).map((team) => ({ name: team.name, slug: team.slug, html_url: team.html_url })),
+        });
+      }
+
+      const pr = await githubRequest(ctx.githubToken, base);
+      const headSha = pr.head?.sha;
+      if (!headSha) throw new Error('Pull request head SHA is unavailable.');
+      if (method === 'get_status') {
+        const status = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/commits/${encodeURIComponent(headSha)}/status`);
+        return textResult({
+          sha: status.sha,
+          state: status.state,
+          total_count: status.total_count,
+          statuses: (status.statuses ?? []).map((item) => ({
+            context: item.context,
+            state: item.state,
+            description: item.description,
+            target_url: item.target_url,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+          })),
+        });
+      }
+      if (method === 'get_check_runs') {
+        const checks = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/commits/${encodeURIComponent(headSha)}/check-runs?${pagination}`);
+        return textResult({
+          sha: headSha,
+          total_count: checks.total_count,
+          check_runs: (checks.check_runs ?? []).map((run) => ({
+            id: run.id,
+            name: run.name,
+            status: run.status,
+            conclusion: run.conclusion,
+            started_at: run.started_at,
+            completed_at: run.completed_at,
+            details_url: run.details_url,
+            app: run.app?.slug,
+          })),
+        });
+      }
+      throw new Error(`Unsupported get_pull_request method "${method}".`);
     },
   },
   {
@@ -1147,20 +1487,157 @@ const tools = [
     },
   },
   {
-    name: 'commit_files_from_manifest_url',
-    description: 'Download a JSON manifest of files/source_url entries and commit all blobs in one call.',
+    name: 'commit_zip_archive',
+    description: 'Accept one uploaded ZIP file, validate and secret-scan its entries, then commit the complete archive tree to an existing branch in one Git commit.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['archive_file'] },
     inputSchema: {
       type: 'object',
       properties: {
         repo: { type: 'string' },
         branch: { type: 'string' },
-        manifest_url: { type: 'string', description: 'HTTP(S) JSON: {"files":[{"path":"...","source_url":"..."}]}' },
+        archive_file: {
+          type: 'string',
+          description: 'One ChatGPT-uploaded ZIP file. The runtime replaces this value with an authorized file reference.',
+        },
+        commit_message: { type: 'string' },
+        expected_head: { type: 'string', description: 'Optional exact branch HEAD required before commit.' },
+        expected_file_count: { type: 'number', description: 'Optional exact number of non-directory ZIP entries.' },
+      },
+      required: ['repo', 'branch', 'archive_file', 'commit_message'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      validateBranch(args.branch, { protect: true });
+      const archive = normalizeUploadedArchive(args.archive_file);
+      const expectedHead = args.expected_head ? String(args.expected_head) : null;
+      if (expectedHead) {
+        const currentHead = await getBranchSha(ctx.githubToken, owner, repo, args.branch);
+        if (currentHead !== expectedHead) throw new Error(`Branch HEAD mismatch. Expected ${expectedHead}, found ${currentHead}.`);
+      }
+
+      let downloaded;
+      let extractDir;
+      try {
+        downloaded = await downloadSourceToTemp(archive.downloadUrl, archive.name);
+        extractDir = await mkdtemp(join(tmpdir(), 'purr-github-zip-'));
+        const listed = await execFileAsync('unzip', ['-Z1', downloaded.tempPath], {
+          encoding: 'utf8',
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        const rawEntries = listed.stdout.split(/\r?\n/).filter(Boolean);
+        if (rawEntries.length === 0) throw new Error('ZIP archive is empty.');
+
+        const files = [];
+        const seen = new Set();
+        for (const rawEntry of rawEntries) {
+          const normalized = validateZipEntry(rawEntry);
+          if (rawEntry.endsWith('/')) continue;
+          const path = validatePath(normalized, { allowBinary: true, allowImages: true });
+          if (path !== normalized) throw new Error(`ZIP path "${rawEntry}" changed during normalization.`);
+          if (seen.has(path)) throw new Error(`ZIP contains duplicate path "${path}".`);
+          seen.add(path);
+          files.push({ rawEntry, path });
+        }
+        if (files.length === 0) throw new Error('ZIP archive contains no files.');
+        if (limitEnabled(config.maxFilesPerCommit) && files.length > config.maxFilesPerCommit) {
+          throw new Error(`Too many files. Max ${config.maxFilesPerCommit}.`);
+        }
+        if (args.expected_file_count !== undefined && files.length !== Number(args.expected_file_count)) {
+          throw new Error(`ZIP file count mismatch. Expected ${Number(args.expected_file_count)}, found ${files.length}.`);
+        }
+
+        await execFileAsync('unzip', ['-qq', downloaded.tempPath, '-d', extractDir], {
+          encoding: 'utf8',
+          maxBuffer: 4 * 1024 * 1024,
+        });
+
+        const extractRoot = `${await realpath(extractDir)}/`;
+        const treeEntries = [];
+        let totalBytes = 0;
+        for (const file of files) {
+          const filePath = join(extractDir, file.path);
+          const resolved = await realpath(filePath);
+          if (!resolved.startsWith(extractRoot)) throw new Error(`ZIP path "${file.path}" escaped the extraction root.`);
+          const info = await lstat(filePath);
+          if (!info.isFile() || info.isSymbolicLink()) throw new Error(`ZIP path "${file.path}" is not a regular file.`);
+          assertLargeFileSize(info.size, file.path);
+          totalBytes += info.size;
+          if (limitEnabled(config.maxBytesPerCommit) && totalBytes > config.maxBytesPerCommit) {
+            throw new Error(`Commit payload is too large. Max ${config.maxBytesPerCommit} bytes.`);
+          }
+          const sample = await readFileSample(filePath);
+          if (!sampleLooksBinary(sample, '')) await scanTextFileForSecrets(filePath, file.path);
+          const blob = await createBlobFromFile(ctx.githubToken, owner, repo, filePath);
+          treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha: blob.sha });
+        }
+
+        if (expectedHead) {
+          const currentHead = await getBranchSha(ctx.githubToken, owner, repo, args.branch);
+          if (currentHead !== expectedHead) throw new Error(`Branch HEAD changed during upload. Expected ${expectedHead}, found ${currentHead}.`);
+        }
+        const commit = await createCommitFromTreeEntries(ctx.githubToken, owner, repo, args.branch, treeEntries, String(args.commit_message));
+        return textResult({
+          success: true,
+          repo: `${owner}/${repo}`,
+          branch: args.branch,
+          archive: archive.name,
+          files_committed: treeEntries.map((entry) => entry.path),
+          file_count: treeEntries.length,
+          bytes: totalBytes,
+          ...commit,
+        });
+      } finally {
+        if (extractDir) await rm(extractDir, { recursive: true, force: true });
+        if (downloaded?.tempPath) await rm(downloaded.tempPath, { force: true });
+        if (downloaded?.tempDir) await rm(downloaded.tempDir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'commit_files_from_manifest_url',
+    description: 'Commit all files from either an HTTP(S) JSON manifest or one uploaded ZIP archive in a single Git commit.',
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['manifest_url'] },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        branch: { type: 'string' },
+        manifest_url: {
+          description: 'HTTP(S) JSON manifest URL or one uploaded ZIP file.',
+          oneOf: [
+            { type: 'string' },
+            { type: 'object' },
+            { type: 'array' },
+          ],
+        },
+        archive_file: {
+          type: 'object',
+          properties: {
+            file_id: { type: 'string' },
+            download_url: { type: 'string' },
+            file_name: { type: 'string' },
+            mime_type: { type: 'string' },
+          },
+          required: ['file_id', 'download_url'],
+        },
+        expected_head: { type: 'string', description: 'Optional exact branch HEAD required for ZIP mode.' },
+        expected_file_count: { type: 'number', description: 'Optional exact file count required for ZIP mode.' },
         commit_message: { type: 'string' },
       },
       required: ['repo', 'branch', 'manifest_url', 'commit_message'],
     },
     handler: async (args, ctx) => {
+      const uploadedArchive = args.archive_file ?? (typeof args.manifest_url === 'object' ? args.manifest_url : null) ?? (Array.isArray(args.openaiFileIdRefs) ? args.openaiFileIdRefs : null);
+      const hasManifest = typeof args.manifest_url === 'string' && /^https?:\/\//i.test(args.manifest_url);
+      const hasArchive = Boolean(uploadedArchive);
+      if (hasManifest === hasArchive) throw new Error('Provide one HTTP(S) manifest URL or one uploaded ZIP file.');
+      if (hasArchive) {
+        const zipTool = tools.find((tool) => tool.name === 'commit_zip_archive');
+        if (!zipTool) throw new Error('ZIP archive handler is unavailable.');
+        return zipTool.handler({ ...args, archive_file: uploadedArchive }, ctx);
+      }
       const { owner, repo } = validateRepo(args.repo);
       validateBranch(args.branch, { protect: true });
       const manifest = await fetchJsonFromUrl(args.manifest_url);
@@ -1222,6 +1699,113 @@ const tools = [
         }),
       });
       return textResult({ number: data.number, title: data.title, state: data.state, html_url: data.html_url });
+    },
+  },
+  {
+    name: 'update_pull_request_draft_state',
+    description: 'Convert a pull request to draft or mark it ready for review.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        draft: { type: 'boolean', description: 'true converts to draft; false marks ready for review.' },
+      },
+      required: ['repo', 'number', 'draft'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const number = validatePullNumber(args.number);
+      if (typeof args.draft !== 'boolean') throw new Error('draft must be a boolean.');
+      const current = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls/${number}`);
+      const desiredDraft = args.draft;
+      if (Boolean(current.draft) === desiredDraft) {
+        return textResult({
+          number: current.number,
+          draft: desiredDraft,
+          changed: false,
+          html_url: current.html_url,
+        });
+      }
+      if (!current.node_id) throw new Error('Pull request GraphQL node id is unavailable.');
+
+      const mutationName = desiredDraft ? 'convertPullRequestToDraft' : 'markPullRequestReadyForReview';
+      const query = `mutation($pullRequestId: ID!) {
+        ${mutationName}(input: { pullRequestId: $pullRequestId }) {
+          pullRequest { number isDraft url }
+        }
+      }`;
+      const result = await githubGraphqlRequest(ctx.githubToken, query, { pullRequestId: current.node_id });
+      const updated = result?.[mutationName]?.pullRequest;
+      if (!updated) throw new Error(`GitHub GraphQL did not return ${mutationName} result.`);
+      return textResult({
+        number: updated.number,
+        draft: Boolean(updated.isDraft),
+        changed: true,
+        html_url: updated.url,
+      });
+    },
+  },
+  {
+    name: 'request_pull_request_reviewers',
+    description: 'Request pull request reviews from GitHub users and/or organization teams.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        reviewers: { type: 'array', items: { type: 'string' }, description: 'GitHub usernames.' },
+        team_reviewers: { type: 'array', items: { type: 'string' }, description: 'Organization team slugs.' },
+      },
+      required: ['repo', 'number'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const number = validatePullNumber(args.number);
+      const reviewers = Array.isArray(args.reviewers) ? [...new Set(args.reviewers.map(String).filter(Boolean))] : [];
+      const teamReviewers = Array.isArray(args.team_reviewers) ? [...new Set(args.team_reviewers.map(String).filter(Boolean))] : [];
+      if (reviewers.length === 0 && teamReviewers.length === 0) {
+        throw new Error('Provide at least one reviewer or team_reviewer.');
+      }
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls/${number}/requested_reviewers`, {
+        method: 'POST',
+        body: JSON.stringify({ reviewers, team_reviewers: teamReviewers }),
+      });
+      return textResult({
+        number,
+        requested_reviewers: (data.requested_reviewers ?? []).map((user) => user.login),
+        requested_teams: (data.requested_teams ?? []).map((team) => team.slug),
+        html_url: data.html_url,
+      });
+    },
+  },
+  {
+    name: 'update_pull_request_branch',
+    description: 'Update a pull request head branch with the latest changes from its base branch.',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string' },
+        number: { type: 'number' },
+        expected_head_sha: { type: 'string', description: 'Optional expected current head SHA for optimistic concurrency.' },
+      },
+      required: ['repo', 'number'],
+    },
+    handler: async (args, ctx) => {
+      const { owner, repo } = validateRepo(args.repo);
+      const number = validatePullNumber(args.number);
+      const data = await githubRequest(ctx.githubToken, `/repos/${owner}/${repo}/pulls/${number}/update-branch`, {
+        method: 'PUT',
+        body: JSON.stringify(args.expected_head_sha ? { expected_head_sha: String(args.expected_head_sha) } : {}),
+      });
+      return textResult({
+        number,
+        message: data.message,
+        url: data.url,
+      });
     },
   },
   {
@@ -1405,6 +1989,7 @@ const tools = [
     name: 'commit_large_file_from_url',
     description: 'Download one large file from source_url server-side, create a Git blob, and commit it to an existing branch. Images are allowed by ALLOW_IMAGES=true; other binary files require ALLOW_BINARY=true.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    _meta: { 'openai/fileParams': ['source_url'] },
     inputSchema: {
       type: 'object',
       properties: {
@@ -1417,6 +2002,11 @@ const tools = [
       required: ['repo', 'branch', 'path', 'source_url', 'commit_message'],
     },
     handler: async (args, ctx) => {
+      if (args.path === 'ZIP_TREE') {
+        const zipTool = tools.find((tool) => tool.name === 'commit_zip_archive');
+        if (!zipTool) throw new Error('ZIP archive handler is unavailable.');
+        return zipTool.handler({ ...args, archive_file: args.source_url }, ctx);
+      }
       const { owner, repo } = validateRepo(args.repo);
       validateBranch(args.branch, { protect: true });
       const path = validatePath(args.path, { allowBinary: config.allowBinary, allowImages: config.allowImages });
@@ -1455,12 +2045,14 @@ const tools = [
 ];
 
 function toolDefinitions() {
-  return tools.map(({ name, description, inputSchema, annotations }) => ({
+  const definitions = tools.map(({ name, description, inputSchema, annotations, _meta }) => ({
     name,
     description,
     inputSchema,
     ...(annotations ? { annotations } : {}),
+    ...(_meta ? { _meta } : {}),
   }));
+  return decorateGithubTools(definitions);
 }
 
 async function handleRpc(msg, ctx) {
@@ -1480,15 +2072,26 @@ async function handleRpc(msg, ctx) {
     if (!method) return jsonRpcError(id, -32600, 'Invalid JSON-RPC request. Missing method.');
 
     if (method === 'initialize') {
-      return jsonRpcResult(id, {
+      return jsonRpcResult(id, decorateGithubInitialize({
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: 'purr-github-MCP', version: VERSION },
-      });
+      }));
     }
 
     if (method === 'notifications/initialized') {
       return null;
+    }
+
+    if (method === 'resources/list') {
+      return jsonRpcResult(id, { resources: listGithubMcpAppResources() });
+    }
+
+    if (method === 'resources/read') {
+      const uri = msg?.params?.uri ?? '';
+      const resource = readGithubMcpAppResource(uri, ctx.origin);
+      if (!resource) return jsonRpcError(id, -32002, `Resource not found: ${uri}`);
+      return jsonRpcResult(id, resource);
     }
 
     if (method === 'tools/list') {
@@ -1501,7 +2104,7 @@ async function handleRpc(msg, ctx) {
       const tool = tools.find((item) => item.name === toolName);
       if (!tool) return jsonRpcError(id, -32602, `Unknown tool: ${toolName}`);
       const result = await tool.handler(args, ctx);
-      return jsonRpcResult(id, result);
+      return jsonRpcResult(id, decorateGithubToolResult(toolName, result));
     }
 
     return jsonRpcError(id, -32601, `Method not found: ${method}`);
@@ -1603,7 +2206,11 @@ async function handleRequest(req, res) {
     return sendJson(res, 400, { error: error?.message ?? 'Invalid JSON body.' });
   }
 
-  const ctx = { githubToken: auth.githubToken, caller: auth.caller };
+  const ctx = {
+    githubToken: auth.githubToken,
+    caller: auth.caller,
+    origin: config.publicBaseUrl || `${url.protocol}//${url.host}`,
+  };
   const response = await handleRpc(body, ctx);
   const sessionId = url.searchParams.get('sessionId') || req.headers['mcp-session-id'];
   const session = sessionId ? sessions.get(String(sessionId)) : null;

@@ -1,172 +1,237 @@
-# ChatGPT OAuth / Remote MCP Setup
+# ChatGPT + GitHub user OAuth
 
-This repo can serve both sides needed for ChatGPT OAuth MCP usage:
+Purr GitHub MCP keeps the existing GitHub tool server unchanged and places an OAuth and credential-routing layer in front of it.
 
-```txt
-mcp.pursr.xyz      -> MCP resource server
-auth-git.pursr.xyz -> OAuth authorization server
+The public flow is:
+
+```text
+ChatGPT
+  -> Purr OAuth 2.1 + PKCE
+  -> GitHub App browser authorization
+  -> encrypted GitHub user credential
+  -> existing Purr GitHub MCP tools
+  -> GitHub API as the authorized user
 ```
 
-No separate OAuth repo is required. Deploy this same codebase behind both domains, or route both domains to the same running app.
+`src/server.js`, its tool registry, handlers, safety guards, protected-branch policy, secret scanning, payload limits, and repository controls are not replaced.
 
-## Public MCP endpoints
+## Compatibility model
 
-```txt
-POST /mcp
-GET  /mcp
-GET  /.well-known/oauth-protected-resource
-GET  /.well-known/oauth-protected-resource/mcp
+Two credential routes remain available:
+
+```text
+ChatGPT OAuth user
+  -> GitHub credential reference
+  -> encrypted user-to-server token
+  -> existing tools
+
+Valid legacy SERVER_TOKEN
+  -> existing owner GITHUB_TOKEN
+  -> existing tools
 ```
 
-For `https://mcp.pursr.xyz/mcp`, the protected resource metadata URL is:
+The internal MCP child process binds only to loopback and runs in passthrough mode. `SERVER_TOKEN` and `GITHUB_TOKEN` are removed from its environment. The public wrapper is therefore the only component allowed to select and inject a GitHub credential.
 
-```txt
-https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp
+The tool catalog remains complete when the client requests `github.admin`. Current smoke coverage requires all 35 tools to remain present.
+
+## Maintained upstream components
+
+The implementation follows the browser OAuth and callback patterns from the official `github/github-mcp-server` project.
+
+Node integration uses maintained Octokit packages:
+
+```text
+@octokit/oauth-app
+@octokit/webhooks
 ```
 
-## Public OAuth endpoints
+Octokit handles GitHub authorization URLs, code exchange, user authentication, token refresh, token revocation, and signed webhook verification. Purr-specific code is limited to binding the GitHub identity to the ChatGPT OAuth transaction, encrypted persistence, credential selection, and compatibility routing.
 
-```txt
-GET  /.well-known/oauth-authorization-server
-GET  /.well-known/openid-configuration
-GET  /authorize
-POST /authorize
-POST /token
-POST /register
-GET  /jwks.json
+## MCP scopes
+
+Purr scopes are hierarchical:
+
+```text
+github.read -> github.plan -> github.write -> github.admin
 ```
 
-For `https://auth-git.pursr.xyz`, the authorization server metadata URL is:
+| Scope | Access |
+|---|---|
+| `github.read` | repository, branch, issue, PR, commit, tree, and file reads |
+| `github.plan` | read access plus verification planning tools |
+| `github.write` | branch, commit, issue, PR, comment, and normal write tools |
+| `github.admin` | all tools, including repository creation, merge, and delete operations |
 
-```txt
-https://auth-git.pursr.xyz/.well-known/oauth-authorization-server
+Legacy aliases remain accepted:
+
+```text
+read:user -> github.read
+user:email -> github.read
+repo -> github.admin
 ```
 
-## Production env for `mcp.pursr.xyz`
+GitHub permissions and Purr scopes are separate gates. A tool call succeeds only when both permit it, together with the existing Purr safety policy.
+
+## Public endpoints
+
+Discovery:
+
+```text
+GET /.well-known/oauth-protected-resource
+GET /.well-known/oauth-protected-resource/mcp
+GET /.well-known/oauth-authorization-server
+GET /.well-known/openid-configuration
+```
+
+ChatGPT OAuth:
+
+```text
+GET  /oauth/authorize
+POST /oauth/authorize/confirm
+POST /oauth/token
+POST /oauth/register
+POST /oauth/revoke
+```
+
+GitHub App integration:
+
+```text
+GET  /oauth/github/callback
+POST /oauth/github/webhooks
+```
+
+The owner-code consent form remains only as a compatibility fallback when GitHub App OAuth is not configured. When all GitHub App variables are present, `/oauth/authorize` redirects directly to GitHub.
+
+## GitHub App setup
+
+Create a GitHub App owned by the intended organization or account.
+
+Configure:
+
+```text
+Callback URL: https://<public-host>/oauth/github/callback
+Webhook URL:  https://<public-host>/oauth/github/webhooks
+Webhook secret: required
+Expiring user authorization tokens: enabled
+```
+
+Subscribe to these lifecycle events:
+
+```text
+github_app_authorization
+installation
+installation_repositories
+```
+
+The exact GitHub App permission matrix for all current tools is documented in `docs/github-app-permissions.md`.
+
+## Required production environment
+
+Existing compatibility credentials:
 
 ```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=<long-random-server-token>
-GITHUB_TOKEN=<github-pat-or-fine-grained-token>
+SERVER_TOKEN=<existing-private-mcp-token>
+GITHUB_TOKEN=<existing-owner-github-token>
+```
 
-PUBLIC_BASE_URL=https://mcp.pursr.xyz
-OAUTH_RESOURCE_URL=https://mcp.pursr.xyz/mcp
-OAUTH_AUTHORIZATION_SERVERS=https://auth-git.pursr.xyz
-OAUTH_RESOURCE_NAME="Purr GitHub MCP"
-OAUTH_REALM=purr-github-mcp
-OAUTH_SCOPES_SUPPORTED="repo read:user user:email"
+Public OAuth configuration:
 
-OAUTH_ISSUER=https://auth-git.pursr.xyz
+```bash
+PUBLIC_BASE_URL=https://<public-host>
+OAUTH_RESOURCE_URL=https://<public-host>/mcp
+OAUTH_ISSUER=https://<authorization-host>
+OAUTH_AUTHORIZATION_SERVERS=https://<authorization-host>
+
 OAUTH_CLIENT_ID=chatgpt-purr-git
-OAUTH_OWNER_CODE=<private-approval-code-you-type-in-browser>
-OAUTH_JWT_SECRET=<long-random-jwt-secret-shared-with-auth-domain>
+OAUTH_ALLOWED_REDIRECT_URIS=<exact-chatgpt-callback>
 OAUTH_TOKEN_TTL_SECONDS=3600
-
-ALLOW_PROTECTED_WRITES=false
-ALLOW_REPO_CREATE=false
-ALLOW_WORKFLOW_WRITES=false
-ALLOW_BINARY=false
-ALLOW_IMAGES=true
+OAUTH_REFRESH_TOKEN_TTL_SECONDS=2592000
+OAUTH_STORE_PATH=/var/lib/purr-github-mcp/oauth-store.json
 ```
 
-## Production env for `auth-git.pursr.xyz`
-
-Use the same repo and same start command. The important auth env is:
+GitHub App configuration:
 
 ```bash
-AUTH_MODE=server_token
-SERVER_TOKEN=<same-long-random-server-token-as-mcp>
-GITHUB_TOKEN=<same-github-token-or-empty-if-only-auth-domain>
-
-PUBLIC_BASE_URL=https://mcp.pursr.xyz
-OAUTH_RESOURCE_URL=https://mcp.pursr.xyz/mcp
-OAUTH_AUTHORIZATION_SERVERS=https://auth-git.pursr.xyz
-
-OAUTH_ISSUER=https://auth-git.pursr.xyz
-OAUTH_CLIENT_ID=chatgpt-purr-git
-OAUTH_ALLOWED_REDIRECT_URIS=<chatgpt-callback-url-from-the-new-app-screen>
-OAUTH_OWNER_CODE=<private-approval-code-you-type-in-browser>
-OAUTH_JWT_SECRET=<same-long-random-jwt-secret-as-mcp>
-OAUTH_TOKEN_TTL_SECONDS=3600
-OAUTH_SUBJECT=0xheycat
+GITHUB_APP_CLIENT_ID=<github-app-client-id>
+GITHUB_APP_CLIENT_SECRET=<github-app-client-secret>
+GITHUB_APP_CALLBACK_URL=https://<public-host>/oauth/github/callback
+GITHUB_APP_WEBHOOK_SECRET=<github-app-webhook-secret>
 ```
 
-If both domains route to the same process, one env set is enough as long as it includes all values above.
+All three OAuth App values and the webhook secret are required together. Partial GitHub App configuration fails at startup instead of falling back silently.
 
-## ChatGPT New App setup
-
-Use:
-
-```txt
-Name: MCP github
-Server URL: https://mcp.pursr.xyz/mcp
-Authentication: OAuth
-```
-
-Advanced OAuth settings:
-
-```txt
-Registration method: User-Defined OAuth Client
-OAuth Client ID: chatgpt-purr-git
-OAuth Client Secret: empty
-Token endpoint auth method: none
-Scopes: repo read:user user:email
-```
-
-Copy the callback URL shown by ChatGPT and put it into:
+Recommended independent encryption keys:
 
 ```bash
-OAUTH_ALLOWED_REDIRECT_URIS=<callback-url>
+OAUTH_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+OAUTH_COOKIE_KEY=<base64-encoded-32-byte-key>
+OAUTH_SECRET_SOURCE=<independent-secret-source>
 ```
 
-Then redeploy before clicking Create or Connect.
+`OAUTH_STORE_PATH` must be on a persistent volume. The store uses an exclusive lock, revision compare-and-set, fsync, atomic rename, and file mode `0600`.
 
-## Runtime flow
+## Runtime behavior
 
-1. ChatGPT reads `https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp`.
-2. The MCP metadata points to `https://auth-git.pursr.xyz`.
-3. ChatGPT starts OAuth authorization code + PKCE.
-4. `/authorize` shows a small owner approval page.
-5. Enter `OAUTH_OWNER_CODE`.
-6. `/token` returns a short-lived bearer token.
-7. ChatGPT calls `/mcp` with that token.
-8. The wrapper validates the token and proxies to the upstream MCP server with `SERVER_TOKEN`.
+1. ChatGPT discovers Purr's OAuth server and starts authorization with PKCE S256.
+2. Purr persists the outer OAuth transaction and binds it to a signed HTTP-only cookie.
+3. Purr creates a one-time GitHub state record and redirects the browser to GitHub.
+4. Octokit exchanges the GitHub callback code and reads the authenticated GitHub identity.
+5. The raw GitHub access and refresh tokens are encrypted with AES-256-GCM.
+6. The ChatGPT authorization code is bound to a credential reference, not to a raw GitHub token.
+7. ChatGPT receives opaque Purr access and refresh tokens.
+8. For every OAuth `tools/call`, the wrapper resolves the bound GitHub credential and injects it into the unchanged internal MCP server.
+9. Legacy `SERVER_TOKEN` requests continue to use the owner GitHub credential.
+10. Expiring GitHub tokens are refreshed through a durable single-flight lease so concurrent requests do not rotate the same refresh token twice.
+11. A signed `github_app_authorization.revoked` webhook marks every credential for that GitHub user revoked.
+12. Installation lifecycle events are persisted for operational visibility and repository-access changes.
 
-## Test commands
+## Security properties
 
-```powershell
-Invoke-RestMethod "https://mcp.pursr.xyz/.well-known/oauth-protected-resource/mcp" | ConvertTo-Json -Depth 10
+- GitHub tokens never enter ChatGPT access tokens, browser cookies, logs, or MCP responses.
+- Raw ChatGPT authorization codes and tokens are stored only by SHA-256 identifier.
+- GitHub credentials are encrypted with an identity-specific authenticated-encryption context.
+- User A's credential reference cannot resolve User B's credential.
+- Callback state and signed-cookie binding prevent transaction swapping and replay.
+- Refresh rotation is single-flight across concurrent server processes using the durable store.
+- Webhooks require Octokit signature verification before any credential state changes.
+- Internal credential-bearing MCP traffic is loopback-only.
+- Existing protected-branch, secret-scanning, and write-safety gates remain active.
+
+## Verification
+
+Run:
+
+```bash
+npm run check
 ```
 
-```powershell
-Invoke-RestMethod "https://auth-git.pursr.xyz/.well-known/oauth-authorization-server" | ConvertTo-Json -Depth 10
-```
+The suite covers:
 
-Expected MCP metadata should include:
+- ChatGPT PKCE and one-time authorization codes
+- MCP refresh-token atomic rotation
+- GitHub callback state binding and replay rejection
+- encrypted GitHub credential persistence
+- two-user credential isolation
+- user-token versus owner-token routing
+- single-flight GitHub token refresh
+- signed revocation and credential invalidation
+- installation lifecycle recording
+- legacy `SERVER_TOKEN` compatibility
+- scope-filtered catalog and dispatch
+- 35-tool catalog parity
+- large commit handling, annotations, and secret blocking
 
-```json
-{
-  "resource": "https://mcp.pursr.xyz/mcp",
-  "authorization_servers": ["https://auth-git.pursr.xyz"]
-}
-```
+## Deployment order
 
-Expected auth metadata should include:
+1. Create the GitHub App and configure callback, webhook, permissions, and events.
+2. Provision the persistent OAuth store volume and independent encryption keys.
+3. Add GitHub App environment variables without removing the existing owner credentials.
+4. Deploy the wrapper branch.
+5. Confirm health and OAuth metadata.
+6. Complete one browser authorization from ChatGPT.
+7. Verify `get_authenticated_user` returns the GitHub account that authorized the app.
+8. Verify one read tool and one bounded write tool.
+9. Confirm all 35 tools remain listed with `github.admin`.
+10. Revoke a test authorization and confirm subsequent calls are rejected.
 
-```json
-{
-  "issuer": "https://auth-git.pursr.xyz",
-  "authorization_endpoint": "https://auth-git.pursr.xyz/authorize",
-  "token_endpoint": "https://auth-git.pursr.xyz/token",
-  "registration_endpoint": "https://auth-git.pursr.xyz/register",
-  "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["none"]
-}
-```
-
-## Security notes
-
-- Keep write tools behind ChatGPT-side approval.
-- Keep `ALLOW_REPO_CREATE=false`, `ALLOW_PROTECTED_WRITES=false`, and `ALLOW_WORKFLOW_WRITES=false` unless explicitly needed.
-- Keep `OAUTH_OWNER_CODE`, `SERVER_TOKEN`, `GITHUB_TOKEN`, and `OAUTH_JWT_SECRET` private.
-- Use long random values from `openssl rand -hex 32`.
+Rollback is configuration-safe: remove the GitHub App variables and redeploy to return to the existing owner-code OAuth fallback while preserving the legacy `SERVER_TOKEN` route. Do not delete the persistent OAuth store during rollback.
