@@ -1,7 +1,12 @@
 import { spawn } from 'node:child_process';
 import { createServer, request as httpRequest } from 'node:http';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readUserSession } from './user-session.js';
 
+import {
+  accessTokenIdentityClaims,
+  authorizationCodeIdentityFields,
+} from './oauth-identity.js';
 function env(key, fallback = '') {
   return process.env[key] ?? fallback;
 }
@@ -99,6 +104,10 @@ function supportedScopes() {
 
 function allowedRedirectUris() {
   return splitList(env('OAUTH_ALLOWED_REDIRECT_URIS') || env('ALLOWED_REDIRECT_URIS'));
+}
+
+function isHostedMode() {
+  return env('DEPLOYMENT_MODE') === 'hosted';
 }
 
 function ownerCode() {
@@ -234,9 +243,7 @@ function isRedirectAllowed(clientId, redirectUri) {
   const registered = registeredClients.get(clientId);
   if (registered?.redirect_uris?.includes(redirectUri)) return true;
   if (clientId === config.defaultClientId) {
-    const allowed = allowedRedirectUris();
-    if (allowed.length > 0) return allowed.includes(redirectUri);
-    return redirectUri.startsWith('https://chatgpt.com/connector/oauth/');
+    return allowedRedirectUris().includes(redirectUri);
   }
   return false;
 }
@@ -292,8 +299,8 @@ function renderAuthorizePage(params, req, error = '') {
     ${error ? `<p class="err">${escapeHtml(error)}</p>` : ''}
     <form method="post" action="/authorize">
       ${hidden}
-      <label>Owner approval code</label>
-      <input type="password" name="owner_code" autocomplete="current-password" required autofocus>
+      ${isHostedMode() ? '' : `<label>Owner approval code</label>
+      <input type="password" name="owner_code" autocomplete="current-password" required autofocus>`}
       <button type="submit">Authorize ChatGPT</button>
     </form>
   </main>
@@ -313,8 +320,13 @@ async function readRequestBody(req, maxBytes = 64 * 1024) {
 }
 
 async function handleAuthorize(req, res, url) {
-  if (!ownerCode()) {
+  if (!isHostedMode() && !ownerCode()) {
     sendHtml(res, 500, '<h1>OAuth setup required</h1><p>Set OAUTH_OWNER_CODE before using /authorize.</p>');
+    return;
+  }
+  const session = isHostedMode() ? readUserSession(req) : null;
+  if (isHostedMode() && !session.ok) {
+    sendHtml(res, 401, '<h1>GitHub sign-in required</h1><p>Sign in with GitHub before authorizing this MCP connection.</p>');
     return;
   }
   if (req.method === 'GET') {
@@ -337,7 +349,7 @@ async function handleAuthorize(req, res, url) {
     sendHtml(res, 400, renderAuthorizePage(params, req, error));
     return;
   }
-  if (!timingEqualString(params.get('owner_code') || '', ownerCode())) {
+  if (!isHostedMode() && !timingEqualString(params.get('owner_code') || '', ownerCode())) {
     sendHtml(res, 401, renderAuthorizePage(params, req, 'Invalid owner approval code.'));
     return;
   }
@@ -348,6 +360,7 @@ async function handleAuthorize(req, res, url) {
     scope: params.get('scope') || supportedScopes().join(' '),
     resource: params.get('resource') || resourceUrl(req),
     code_challenge: params.get('code_challenge'),
+    ...(isHostedMode() ? authorizationCodeIdentityFields(session) : {}),
     created_at: Date.now(),
     expires_at: Date.now() + 5 * 60 * 1000,
   });
@@ -391,9 +404,12 @@ async function handleToken(req, res) {
     return;
   }
   const now = Math.floor(Date.now() / 1000);
+  const identityClaims = isHostedMode()
+    ? accessTokenIdentityClaims(entry)
+    : { sub: env('OAUTH_SUBJECT', '0xheycat') };
   const accessToken = signJwt({
     iss: authIssuer(req),
-    sub: env('OAUTH_SUBJECT', '0xheycat'),
+    ...identityClaims,
     aud: entry.resource,
     client_id: entry.client_id,
     scope: entry.scope,
