@@ -245,6 +245,19 @@ MIT
 
 ---
 
+## Contributing
+
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-7C3AED.svg)](CONTRIBUTING.md)
+[![good first issues](https://img.shields.io/github/issues/0xheycat/Purr-github-MCP/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/0xheycat/Purr-github-MCP/labels/good%20first%20issue)
+
+Contributions are welcome and appreciated! 🐾
+
+- 📖 Read the [Contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
+- 🌱 New here? Look for [`good first issue`](https://github.com/0xheycat/Purr-github-MCP/labels/good%20first%20issue).
+- 💬 Ideas & questions → [Discussions](https://github.com/0xheycat/Purr-github-MCP/discussions).
+
+---
+
 ## Keywords
 
 <sub>`purr-github-mcp` · `mcp` · `model-context-protocol` · `mcp-server` · `github` · `github-api` · `github-app` · `octokit` · `oauth` · `pkce` · `ai-agents` · `coding-agents` · `chatgpt-connector` · `codex` · `nodejs` · `automation` · `pull-requests` · `devtools` · `self-hosted`</sub>
