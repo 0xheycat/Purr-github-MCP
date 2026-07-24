@@ -1,12 +1,19 @@
-# 🐾 Purr GitHub MCP
+<p align="center">
+  <img src="assets/logo.svg" alt="Purr GitHub MCP" width="560" />
+</p>
 
-A Node.js MCP server that connects ChatGPT, Notion, and other agents to GitHub through a guarded HTTP tool layer.
+<p align="center">
+  <strong>Self-hosted GitHub MCP server for ChatGPT, Notion, and coding agents.</strong><br>
+  Repository inspection, safe file changes, commits, and pull requests through a guarded HTTP tool layer.
+</p>
 
-![Runtime](https://img.shields.io/badge/runtime-Node.js%2022+-3C873A?style=for-the-badge&logo=node.js&logoColor=white)
-![MCP](https://img.shields.io/badge/protocol-MCP-7C3AED?style=for-the-badge)
-![Auth](https://img.shields.io/badge/auth-OAuth%20%2B%20Bearer-111827?style=for-the-badge)
-![Deploy](https://img.shields.io/badge/deploy-Manufact-0EA5E9?style=for-the-badge)
-![License](https://img.shields.io/badge/license-MIT-F59E0B?style=for-the-badge)
+<p align="center">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-Node.js%2022+-3C873A?logo=node.js&logoColor=white" />
+  <img alt="protocol" src="https://img.shields.io/badge/protocol-MCP-7C3AED" />
+  <img alt="auth" src="https://img.shields.io/badge/auth-OAuth%202.1%20%2B%20PKCE-111827" />
+  <a href="https://github.com/0xheycat/Purr-github-MCP/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/0xheycat/Purr-github-MCP?logo=github&color=F59E0B" /></a>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-F59E0B" />
+</p>
 
 ## What it provides
 
