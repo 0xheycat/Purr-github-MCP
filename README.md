@@ -12,6 +12,7 @@
   <img alt="protocol" src="https://img.shields.io/badge/protocol-MCP-7C3AED" />
   <img alt="auth" src="https://img.shields.io/badge/auth-OAuth%202.1%20%2B%20PKCE-111827" />
   <a href="https://github.com/0xheycat/Purr-github-MCP/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/0xheycat/Purr-github-MCP?logo=github&color=F59E0B" /></a>
+  <a href="https://0xheycat.xyz/work/purr-github"><img alt="project" src="https://img.shields.io/badge/project-0xheycat.xyz-7C3AED" /></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-F59E0B" />
 </p>
 
