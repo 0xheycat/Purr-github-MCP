@@ -235,3 +235,9 @@ Purr-github-MCP/
 ## License
 
 MIT
+
+---
+
+## Keywords
+
+<sub>`purr-github-mcp` · `mcp` · `model-context-protocol` · `mcp-server` · `github` · `github-api` · `github-app` · `octokit` · `oauth` · `pkce` · `ai-agents` · `coding-agents` · `chatgpt-connector` · `codex` · `nodejs` · `automation` · `pull-requests` · `devtools` · `self-hosted`</sub>
